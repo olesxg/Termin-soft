@@ -20,7 +20,7 @@ import { detectSlots } from './src/detect.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 
 const config = {
-  startUrl: str('START_URL', 'https://portal.minv.sk/'),
+  startUrl: str('START_URL', 'https://pes.minv.sk/'),
   userDataDir: str('USER_DATA_DIR'),
   executablePath: str('CHROMIUM_EXECUTABLE_PATH'),
   slowMoMs: num('SLOW_MO_MS', 0),
