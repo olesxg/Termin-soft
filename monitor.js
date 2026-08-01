@@ -1,0 +1,232 @@
+#!/usr/bin/env node
+/**
+ * Variant 1 — API pinger.
+ *
+ * You walk the wizard by hand once (CAPTCHA + SMS), reach the date-picking
+ * step, copy the XHR that fetches the dates, and drop its cookies/headers into
+ * .env. This script then replays exactly that request on a loop, so the
+ * session stays warm and you never touch the CAPTCHA again.
+ *
+ * See README.md — "Варіант 1" — for how to grab the request.
+ */
+import axios from 'axios';
+import fs from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
+
+import { str, num, bool, list, json, required, nextDelay, ts } from './src/config.js';
+import { detectSlots } from './src/detect.js';
+import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
+
+/**
+ * A POST payload containing both quote characters cannot be written safely into
+ * a .env value, so it can live in its own file instead.
+ */
+function readBody() {
+  const file = str('REQUEST_BODY_FILE');
+  if (file) return fs.readFileSync(file, 'utf8').trim();
+  return str('REQUEST_BODY');
+}
+
+const config = {
+  url: required('TARGET_URL'),
+  method: str('METHOD', 'GET').toUpperCase(),
+  cookie: required('COOKIE_HEADER'),
+  csrfToken: str('CSRF_TOKEN'),
+  csrfHeaderName: str('CSRF_HEADER_NAME', 'X-CSRF-TOKEN'),
+  body: readBody(),
+  contentType: str('CONTENT_TYPE', 'application/json'),
+  userAgent: str(
+    'USER_AGENT',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  ),
+  accept: str('ACCEPT', 'application/json, text/javascript, */*; q=0.01'),
+  acceptLanguage: str('ACCEPT_LANGUAGE', 'sk-SK,sk;q=0.9,en;q=0.8'),
+  referer: str('REFERER'),
+  origin: str('ORIGIN'),
+  extraHeaders: json('EXTRA_HEADERS', {}),
+
+  intervalMs: num('INTERVAL_MS', 15_000),
+  jitterMs: num('JITTER_MS', 3_000),
+  timeoutMs: num('REQUEST_TIMEOUT_MS', 20_000),
+
+  noSlotsPhrases: list('NO_SLOTS_TEXT', ['Nie sú momentálne dostupné žiadne termíny']),
+  slotPhrases: list('SLOT_TEXT', []),
+  jsonPath: str('SLOT_JSON_PATH'),
+
+  authFailTolerance: num('AUTH_FAIL_TOLERANCE', 1),
+  networkFailTolerance: num('NETWORK_FAIL_TOLERANCE', 5),
+  inconclusiveIsSlot: bool('TREAT_INCONCLUSIVE_AS_SLOT', false),
+  heartbeatEvery: num('HEARTBEAT_EVERY', 20),
+};
+
+if (!['GET', 'POST', 'PUT'].includes(config.method)) {
+  throw new Error(`METHOD must be GET, POST or PUT — got "${config.method}"`);
+}
+
+function buildHeaders() {
+  const headers = {
+    Cookie: config.cookie,
+    'User-Agent': config.userAgent,
+    Accept: config.accept,
+    'Accept-Language': config.acceptLanguage,
+    'X-Requested-With': 'XMLHttpRequest',
+    // A cached 304/200-from-cache would silently hide a new slot.
+    'Cache-Control': 'no-cache',
+    Pragma: 'no-cache',
+  };
+
+  if (config.referer) headers.Referer = config.referer;
+  if (config.origin) headers.Origin = config.origin;
+  if (config.csrfToken) headers[config.csrfHeaderName] = config.csrfToken;
+  if (config.method !== 'GET' && config.body) headers['Content-Type'] = config.contentType;
+
+  return { ...headers, ...config.extraHeaders };
+}
+
+const client = axios.create({
+  timeout: config.timeoutMs,
+  // Never throw on status: we want to inspect 401/403/302 ourselves.
+  validateStatus: () => true,
+  // The portal bounces an expired session to the wizard's step 1 via a redirect.
+  // Following it would return a happy 200 full of nothing.
+  maxRedirects: 0,
+  decompress: true,
+  transformResponse: [(data) => data], // keep the raw string
+  httpAgent: new http.Agent({ keepAlive: true }),
+  httpsAgent: new https.Agent({ keepAlive: true }),
+});
+
+let stopBeeping = null;
+let running = true;
+let pings = 0;
+let authFailures = 0;
+let networkFailures = 0;
+
+function shutdown(code, message) {
+  running = false;
+  if (stopBeeping) stopBeeping();
+  if (message) console.error(message);
+  process.exit(code);
+}
+
+async function pingOnce() {
+  const response = await client.request({
+    url: config.url,
+    method: config.method,
+    headers: buildHeaders(),
+    data: config.method === 'GET' ? undefined : config.body || undefined,
+  });
+
+  const { status, data } = response;
+
+  if (status === 401 || status === 403) {
+    authFailures += 1;
+    console.error(
+      `[${ts()}] HTTP ${status} — session rejected (${authFailures}/${config.authFailTolerance})`,
+    );
+    if (authFailures >= config.authFailTolerance) {
+      await notifyTelegram(
+        `⛔️ Termín monitor stopped: HTTP ${status}. Session expired or the IP got blocked — redo the wizard and refresh COOKIE_HEADER.`,
+      );
+      shutdown(
+        1,
+        '\nSession is dead (401/403). Walk the wizard again, re-copy COOKIE_HEADER/CSRF_TOKEN into .env, restart.\n' +
+          'A 403 on the very first ping usually means the IP is blocked — turn on a Slovak/Czech VPN.',
+      );
+    }
+    return;
+  }
+
+  if (status >= 300 && status < 400) {
+    authFailures += 1;
+    const location = response.headers?.location ?? '(no Location header)';
+    console.error(`[${ts()}] HTTP ${status} -> ${location} — kicked back to the wizard`);
+    if (authFailures >= config.authFailTolerance) {
+      await notifyTelegram('⛔️ Termín monitor stopped: session redirected back to step 1.');
+      shutdown(1, '\nSession expired (redirect). Redo the wizard and refresh .env.\n');
+    }
+    return;
+  }
+
+  if (status >= 500) {
+    networkFailures += 1;
+    console.error(`[${ts()}] HTTP ${status} — server error (${networkFailures}/${config.networkFailTolerance})`);
+    if (networkFailures >= config.networkFailTolerance) {
+      shutdown(1, '\nToo many server errors in a row, giving up.\n');
+    }
+    return;
+  }
+
+  if (status !== 200) {
+    console.error(`[${ts()}] HTTP ${status} — unexpected, continuing`);
+    return;
+  }
+
+  // A successful round trip resets both counters.
+  authFailures = 0;
+  networkFailures = 0;
+
+  const result = detectSlots(data, {
+    noSlotsPhrases: config.noSlotsPhrases,
+    slotPhrases: config.slotPhrases,
+    jsonPath: config.jsonPath,
+  });
+
+  if (result.available === true) {
+    return result;
+  }
+
+  if (result.available === null) {
+    console.warn(`[${ts()}] inconclusive — ${result.reason}`);
+    if (result.sample) console.warn(`         body: ${result.sample}`);
+    if (config.inconclusiveIsSlot) return result;
+    return;
+  }
+
+  if (pings === 1 || pings % config.heartbeatEvery === 0) {
+    console.log(`[${ts()}] ping #${pings} — no slots (${result.reason})`);
+  } else {
+    process.stdout.write('.');
+  }
+}
+
+async function loop() {
+  console.log('Termín monitor — API mode');
+  console.log(`  target   : ${config.method} ${config.url}`);
+  console.log(`  interval : ${config.intervalMs / 1000}s (+ up to ${config.jitterMs / 1000}s jitter)`);
+  console.log(`  no-slots : ${config.noSlotsPhrases.join(' | ') || '(none configured)'}`);
+  console.log('  Ctrl+C to stop. Keep the volume up.\n');
+
+  while (running) {
+    pings += 1;
+    try {
+      const hit = await pingOnce();
+      if (hit) {
+        stopBeeping = await raiseSlotAlarm([
+          `reason: ${hit.reason}`,
+          hit.sample ? `data  : ${hit.sample}` : 'open the portal tab and click through NOW',
+          `url   : ${config.referer || config.url}`,
+        ]);
+        console.log('Beeping until you kill me (Ctrl+C). Go book it.');
+        return;
+      }
+    } catch (err) {
+      networkFailures += 1;
+      console.error(
+        `\n[${ts()}] request failed: ${err.code ?? ''} ${err.message} (${networkFailures}/${config.networkFailTolerance})`,
+      );
+      if (networkFailures >= config.networkFailTolerance) {
+        await notifyTelegram('⛔️ Termín monitor stopped: network keeps failing.');
+        shutdown(1, '\nToo many network failures in a row, giving up.\n');
+      }
+    }
+
+    if (!running) break;
+    await new Promise((resolve) => setTimeout(resolve, nextDelay(config.intervalMs, config.jitterMs)));
+  }
+}
+
+process.on('SIGINT', () => shutdown(0, '\nStopped.'));
+
+loop().catch((err) => shutdown(1, `\nFatal: ${err.message}`));

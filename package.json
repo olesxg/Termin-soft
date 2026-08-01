@@ -1,0 +1,22 @@
+{
+  "name": "termin-soft",
+  "version": "1.0.0",
+  "description": "Monitor for free appointment slots (termíny) on the Slovak police portal",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "monitor": "node monitor.js",
+    "browser": "node browser-monitor.js",
+    "capture": "node capture-session.js",
+    "install:browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.48.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
