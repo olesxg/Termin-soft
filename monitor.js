@@ -13,10 +13,39 @@ import axios from 'axios';
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import path from 'node:path';
+import tls from 'node:tls';
+import { fileURLToPath } from 'node:url';
 
 import { str, num, bool, list, json, required, nextDelay, ts } from './src/config.js';
 import { detectSlots } from './src/detect.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * pes.minv.sk serves ONLY its leaf certificate — it omits the "CA Disig R2I2"
+ * intermediate. Browsers paper over that by fetching the missing cert via the
+ * AIA extension; Node does not, so verification fails with
+ * UNABLE_TO_VERIFY_LEAF_SIGNATURE even though the certificate is perfectly
+ * valid. certs/ca-disig.pem supplies the missing link.
+ *
+ * This keeps full verification on — it is emphatically not the same thing as
+ * rejectUnauthorized:false. CA Disig Root R2 is already in Node's trust store;
+ * we are only handing Node the chain the server should have sent.
+ */
+function trustedCAs() {
+  const extra = [];
+  for (const file of [path.join(HERE, 'certs', 'ca-disig.pem'), str('EXTRA_CA_FILE')]) {
+    if (!file) continue;
+    try {
+      extra.push(fs.readFileSync(file, 'utf8'));
+    } catch (err) {
+      if (file === str('EXTRA_CA_FILE')) throw new Error(`EXTRA_CA_FILE unreadable: ${err.message}`);
+    }
+  }
+  return extra.length > 0 ? [...tls.rootCertificates, ...extra] : undefined;
+}
 
 /**
  * A POST payload containing both quote characters cannot be written safely into
@@ -94,7 +123,7 @@ const client = axios.create({
   decompress: true,
   transformResponse: [(data) => data], // keep the raw string
   httpAgent: new http.Agent({ keepAlive: true }),
-  httpsAgent: new https.Agent({ keepAlive: true }),
+  httpsAgent: new https.Agent({ keepAlive: true, ca: trustedCAs() }),
 });
 
 let stopBeeping = null;
@@ -216,6 +245,12 @@ async function loop() {
       console.error(
         `\n[${ts()}] request failed: ${err.code ?? ''} ${err.message} (${networkFailures}/${config.networkFailTolerance})`,
       );
+      if (/UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT/.test(err.code ?? '')) {
+        console.error(
+          '         The server sent an incomplete certificate chain. Grab its intermediate CA\n' +
+            '         and point EXTRA_CA_FILE at it (certs/ca-disig.pem already covers *.minv.sk).',
+        );
+      }
       if (networkFailures >= config.networkFailTolerance) {
         await notifyTelegram('⛔️ Termín monitor stopped: network keeps failing.');
         shutdown(1, '\nToo many network failures in a row, giving up.\n');

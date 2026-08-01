@@ -19,7 +19,7 @@ import { str, num, bool, list } from './src/config.js';
 import { normalize } from './src/detect.js';
 
 const config = {
-  startUrl: str('START_URL', 'https://portal.minv.sk/'),
+  startUrl: str('START_URL', 'https://pes.minv.sk/'),
   executablePath: str('CHROMIUM_EXECUTABLE_PATH'),
   headless: bool('HEADLESS', false),
   outDir: str('CAPTURE_DIR', 'captured'),
