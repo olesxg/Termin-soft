@@ -11,6 +11,18 @@
  *   4. nothing matched                 -> inconclusive, reported as such
  */
 
+/**
+ * The portal's own "no free slots" wording, taken verbatim from its JS bundle
+ * (keys noDatesAvailable / noAvailableSlots / missDate / missTime). Used as the
+ * default when NO_SLOTS_TEXT is not set.
+ */
+export const PORTAL_NO_SLOTS_PHRASES = [
+  'Nie sú momentálne dostupné žiadne termíny',
+  'Vo zvolenom dátume nie je prístupný žiaden voľný termín',
+  'Pre zvolené pracovisko nie je k dispozícii žiadna voľná rezervácia',
+  'Pre zvolený deň nie je k dispozícii žiadna voľná',
+];
+
 /** Lowercase + strip Slovak diacritics, so "Nie sú" matches "nie su". */
 export function normalize(text) {
   return String(text)

@@ -1,9 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { detectSlots, normalize } from '../src/detect.js';
+import { detectSlots, normalize, PORTAL_NO_SLOTS_PHRASES } from '../src/detect.js';
 
 const NO_SLOTS = ['Nie sú momentálne dostupné žiadne termíny'];
+
+test('the portal\'s real "no slots" sentences are all recognised', () => {
+  // Exactly as the server sends them, trailing sentence included.
+  const live = [
+    'Nie sú momentálne dostupné žiadne termíny. Skúste to prosím neskôr.',
+    'Vo zvolenom dátume nie je prístupný žiaden voľný termín. Prosím zvoľte iný termín rezervácie.',
+    'Pre zvolené pracovisko nie je k dispozícii žiadna voľná rezervácia.',
+    'Pre zvolený deň nie je k dispozícii žiadna voľná rezervácia.',
+  ];
+  for (const sentence of live) {
+    const result = detectSlots(JSON.stringify({ message: sentence }), {
+      noSlotsPhrases: PORTAL_NO_SLOTS_PHRASES,
+    });
+    assert.equal(result.available, false, `should be a negative: ${sentence}`);
+  }
+});
+
+test('a real date list is not mistaken for a negative', () => {
+  const body = JSON.stringify({
+    dates: [{ date: '2026-08-14', free: 3 }, { date: '2026-08-15', free: 1 }],
+  });
+  const result = detectSlots(body, { noSlotsPhrases: PORTAL_NO_SLOTS_PHRASES });
+  assert.equal(result.available, true);
+});
 
 test('normalize strips diacritics and case', () => {
   assert.equal(normalize('Nie sú MOMENTÁLNE'), 'nie su momentalne');

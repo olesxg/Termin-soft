@@ -16,7 +16,8 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 
 import { str, num, bool, list } from './src/config.js';
-import { normalize } from './src/detect.js';
+import { PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
+import { scoreRequest, countDates } from './src/rank.js';
 
 const config = {
   startUrl: str('START_URL', 'https://pes.minv.sk/'),
@@ -24,33 +25,10 @@ const config = {
   headless: bool('HEADLESS', false),
   outDir: str('CAPTURE_DIR', 'captured'),
   maxBodyChars: num('CAPTURE_MAX_BODY', 20_000),
-  noSlotsPhrases: list('NO_SLOTS_TEXT', ['Nie sú momentálne dostupné žiadne termíny']),
+  noSlotsPhrases: list('NO_SLOTS_TEXT', PORTAL_NO_SLOTS_PHRASES),
 };
 
-/** Words that suggest "this is the request that lists appointments". */
-const INTERESTING = ['termin', 'termín', 'date', 'datum', 'dátum', 'slot', 'availab', 'volny', 'voľn', 'cas', 'čas'];
-
 const captured = [];
-
-function scoreRequest(entry) {
-  let score = 0;
-  const url = normalize(entry.url);
-  const body = normalize(entry.responseBody ?? '');
-
-  if (entry.resourceType === 'xhr' || entry.resourceType === 'fetch') score += 5;
-  // The wizard page itself always mentions "termín" — it is never the endpoint.
-  if (entry.resourceType === 'document') score -= 6;
-  if ((entry.responseContentType ?? '').includes('json')) score += 4;
-  for (const word of INTERESTING) {
-    if (url.includes(normalize(word))) score += 3;
-    if (body.includes(normalize(word))) score += 1;
-  }
-  for (const phrase of config.noSlotsPhrases) {
-    if (body.includes(normalize(phrase))) score += 8; // this endpoint reports slot state
-  }
-  if (/\d{4}-\d{2}-\d{2}|\d{2}\.\d{2}\.\d{4}/.test(entry.responseBody ?? '')) score += 4;
-  return score;
-}
 
 /**
  * dotenv strips surrounding quotes but does NOT unescape \" or \' inside them,
@@ -64,6 +42,48 @@ function envLine(key, value) {
   if (!flat.includes("'")) return `${key}='${flat}'`;
   if (!flat.includes('"')) return `${key}="${flat}"`;
   return `# FIXME: value contains both quote types, quote it by hand\n# ${key}=${flat}`;
+}
+
+/**
+ * The portal ties the session to the IP it saw (it literally POSTs the client's
+ * address to GetIpAddress). If a VPN covers the browser but not Node — an
+ * app-scoped or extension VPN, which is easy to end up with — then monitor.js
+ * would replay a Slovak session from an Italian address and get thrown out.
+ * Cheaper to find out now than after burning an SMS.
+ */
+async function warnOnIpMismatch(page) {
+  const read = async (fetcher) => {
+    try {
+      const res = await fetcher();
+      return res?.ip ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const browserIp = await read(() =>
+    page.evaluate(() => fetch('https://api.ipify.org?format=json').then((r) => r.json())),
+  );
+  const nodeIp = await read(() =>
+    fetch('https://api.ipify.org?format=json', { signal: AbortSignal.timeout(15_000) }).then((r) => r.json()),
+  );
+
+  if (!browserIp || !nodeIp) {
+    console.log('\n(could not compare browser/Node exit IPs — check your VPN by hand)');
+    return;
+  }
+  if (browserIp === nodeIp) {
+    console.log(`\nExit IP: ${nodeIp} — browser and Node agree, good.`);
+    return;
+  }
+
+  console.log('\n' + '!'.repeat(66));
+  console.log('  IP MISMATCH — monitor.js will very likely be rejected.');
+  console.log(`    browser (session is bound to this): ${browserIp}`);
+  console.log(`    Node (monitor.js will ping from)  : ${nodeIp}`);
+  console.log('  Your VPN covers the browser but not Node. Make it system-wide,');
+  console.log('  then re-run the capture so the session is bound to one address.');
+  console.log('!'.repeat(66));
 }
 
 /** page.url() is "about:blank" for the very first request — useless as a Referer. */
@@ -176,27 +196,38 @@ async function main() {
     console.log(`  [${entry.status}] ${entry.method} ${entry.url.slice(0, 120)}`);
   });
 
-  console.log('Session capture — walk the wizard by hand, everything is recorded.\n');
+  console.log('Session capture — walk the wizard by hand, everything is recorded.');
+  console.log('NOTE: the log will contain your name, document number and SMS PIN.');
+  console.log(`      ${config.outDir}/ is gitignored — delete it once .env works.\n`);
   await page.goto(config.startUrl, { waitUntil: 'domcontentloaded' });
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   await rl.question(
-    '\n>>> Solve the CAPTCHA, enter the SMS code, get to the date-selection step.\n' +
-      '>>> Then press ENTER here to dump the session.\n',
+    '\n>>> Solve the CAPTCHA, enter the SMS code, then keep going:\n' +
+      '>>>   service -> office -> until the CALENDAR WITH DATES is on screen.\n' +
+      '>>> The dates step is the one we need — stopping earlier captures the\n' +
+      '>>> wrong request. Press ENTER only once you can see the dates.\n',
   );
   rl.close();
 
   const cookies = await context.cookies();
   const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
   const userAgent = await page.evaluate(() => navigator.userAgent);
+  await warnOnIpMismatch(page);
 
   const ranked = captured
-    .map((entry) => ({ entry, score: scoreRequest(entry) }))
+    .map((entry) => ({ entry, score: scoreRequest(entry, config.noSlotsPhrases) }))
     .sort((a, b) => b.score - a.score || b.entry.at.localeCompare(a.entry.at));
 
   console.log('\nTop candidates for TARGET_URL:');
   for (const { entry, score } of ranked.slice(0, 8)) {
-    console.log(`  score ${String(score).padStart(3)}  ${entry.method} ${entry.url.slice(0, 110)}`);
+    const dates = countDates(entry.responseBody);
+    const tag = [
+      (entry.responseContentType ?? '').includes('json') ? 'json' : 'html',
+      dates ? `${dates} dates` : 'no dates',
+    ].join(', ');
+    console.log(`  score ${String(score).padStart(3)}  [${tag}]  ${entry.method} ${entry.url.slice(0, 90)}`);
+    if (entry.postData) console.log(`             body: ${entry.postData.slice(0, 90)}`);
   }
 
   if (ranked.length === 0) {
@@ -205,13 +236,23 @@ async function main() {
     const target = await writeEnvTemplate(ranked[0].entry, cookieHeader, userAgent);
     console.log(`\nWrote ${target} (top candidate).`);
     console.log(`Full request log: ${logPath}`);
-    console.log('If the top candidate is wrong, pick another URL from the log and edit TARGET_URL by hand.');
+    console.log('If the top candidate looks wrong — no dates in it, or it answered');
+    console.log('HTML — pick a better one from the log and fix TARGET_URL by hand.');
     console.log('\nNext: cp .env.captured .env && npm run monitor');
-    console.log('Do it quickly — the cookies are already ticking.');
   }
 
   await log.close();
-  await browser.close();
+
+  if (bool('CLOSE_BROWSER_ON_EXIT', false)) {
+    await browser.close();
+    return;
+  }
+
+  // Deliberately NOT closing the browser: the portal session lives in it, and
+  // killing the window throws away the CAPTCHA and SMS you just went through.
+  console.log('\nLeaving the browser open so the session stays alive.');
+  console.log('Close it yourself once monitor.js is running. Ctrl+C to exit this script.');
+  await new Promise(() => {});
 }
 
 main().catch((err) => {

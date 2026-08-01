@@ -1,6 +1,9 @@
 node_modules/
+
+# Every .env flavour holds live session cookies — none of them may be committed.
 .env
-.env.local
+.env.*
+!.env.example
 
 # Captured session data — contains cookies and tokens, never commit
 captured/
