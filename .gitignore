@@ -1,0 +1,9 @@
+node_modules/
+.env
+.env.local
+
+# Captured session data — contains cookies and tokens, never commit
+captured/
+screenshots/
+user-data/
+*.log
