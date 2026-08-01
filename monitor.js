@@ -18,7 +18,7 @@ import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 import { str, num, bool, list, json, required, nextDelay, ts } from './src/config.js';
-import { detectSlots } from './src/detect.js';
+import { detectSlots, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -79,7 +79,7 @@ const config = {
   jitterMs: num('JITTER_MS', 3_000),
   timeoutMs: num('REQUEST_TIMEOUT_MS', 20_000),
 
-  noSlotsPhrases: list('NO_SLOTS_TEXT', ['Nie sú momentálne dostupné žiadne termíny']),
+  noSlotsPhrases: list('NO_SLOTS_TEXT', PORTAL_NO_SLOTS_PHRASES),
   slotPhrases: list('SLOT_TEXT', []),
   jsonPath: str('SLOT_JSON_PATH'),
 

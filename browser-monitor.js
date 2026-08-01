@@ -16,7 +16,7 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 
 import { str, num, bool, list, nextDelay, ts } from './src/config.js';
-import { detectSlots } from './src/detect.js';
+import { detectSlots, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 
 const config = {
@@ -42,7 +42,7 @@ const config = {
   scopeSelector: str('SCOPE_SELECTOR'),
   slotSelector: str('SLOT_SELECTOR'),
 
-  noSlotsPhrases: list('NO_SLOTS_TEXT', ['Nie sú momentálne dostupné žiadne termíny']),
+  noSlotsPhrases: list('NO_SLOTS_TEXT', PORTAL_NO_SLOTS_PHRASES),
   slotPhrases: list('SLOT_TEXT', []),
   jsonPath: str('SLOT_JSON_PATH'),
 
