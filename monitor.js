@@ -103,7 +103,10 @@ const config = {
 
   intervalMs: num('INTERVAL_MS', 60_000),
   jitterMs: num('JITTER_MS', 15_000),
-  timeoutMs: num('REQUEST_TIMEOUT_MS', 20_000),
+  // The portal answers slowly when it is struggling: third-party fetches of the
+  // same page came back at 8.7s and 19.6s while our 20s ceiling was cutting
+  // connections off. Well under INTERVAL_MS, so polls still cannot overlap.
+  timeoutMs: num('REQUEST_TIMEOUT_MS', 45_000),
 
   noSlotsPhrases: list('NO_SLOTS_TEXT', PORTAL_NO_SLOTS_PHRASES),
   slotPhrases: list('SLOT_TEXT', []),
