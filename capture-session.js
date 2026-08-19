@@ -32,6 +32,9 @@ const config = {
 
 const captured = [];
 
+/** Latest credentials seen on the wire, in case the browser dies before the dump. */
+const lastSeen = { cookie: '', userAgent: '' };
+
 /**
  * dotenv strips surrounding quotes but does NOT unescape \" or \' inside them,
  * so an escaped quote would survive into the value and break JSON.parse.
@@ -230,6 +233,11 @@ async function main() {
       // body not retained — keep the metadata anyway
     }
 
+    if (/minv\.sk/.test(entry.url)) {
+      if (entry.requestHeaders?.cookie) lastSeen.cookie = entry.requestHeaders.cookie;
+      if (entry.requestHeaders?.['user-agent']) lastSeen.userAgent = entry.requestHeaders['user-agent'];
+    }
+
     captured.push(entry);
     await log.write(`${JSON.stringify(entry)}\n`);
     console.log(`  [${entry.status}] ${entry.method} ${entry.url.slice(0, 120)}`);
@@ -249,10 +257,33 @@ async function main() {
   );
   rl.close();
 
-  const cookies = await context.cookies();
-  const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
-  const userAgent = await page.evaluate(() => navigator.userAgent);
-  await warnOnIpMismatch(page);
+  // The browser may already be gone — closed by hand, or crashed. Everything
+  // needed was recorded as each request went out, so fall back to that rather
+  // than throwing away a session that cost a CAPTCHA and an SMS.
+  let cookieHeader = lastSeen.cookie;
+  let userAgent = lastSeen.userAgent;
+
+  try {
+    const cookies = await context.cookies();
+    if (cookies.length > 0) cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+  } catch {
+    console.warn('\n(browser is gone — using the cookies recorded from its last request)');
+  }
+  try {
+    userAgent = await page.evaluate(() => navigator.userAgent);
+  } catch {
+    // the recorded User-Agent header is just as good
+  }
+  try {
+    await warnOnIpMismatch(page);
+  } catch {
+    console.log('\n(could not compare exit IPs — browser closed)');
+  }
+
+  if (!cookieHeader) {
+    console.error('\nNo cookies anywhere — the wizard never authenticated. Nothing to save.');
+    process.exit(1);
+  }
 
   const ranked = captured
     .map((entry) => ({ entry, score: scoreRequest(entry, config.noSlotsPhrases) }))

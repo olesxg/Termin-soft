@@ -30,7 +30,7 @@ const secondsSince = (iso) => (iso ? (now - new Date(iso).getTime()) / 1000 : In
 const running = isAlive(status.pid) && !status.stoppedAt;
 // One missed poll is jitter; two means it is wedged.
 const budget = ((status.intervalMs ?? 60_000) + (status.jitterMs ?? 15_000)) / 1000;
-const stale = secondsSince(status.lastPingAt) > budget * 2 + 30;
+const stale = secondsSince(status.lastPingAt ?? status.startedAt) > budget * 2 + 30;
 
 const problems = [];
 if (!running) problems.push(status.stoppedAt ? `stopped (exit ${status.exitCode ?? '?'})` : 'process is gone');
