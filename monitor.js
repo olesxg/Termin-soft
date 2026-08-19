@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { str, num, bool, list, json, required, nextDelay, ts } from './src/config.js';
 import { detectSlots, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { readPortalStatus, backoffDelay } from './src/portal.js';
-import { writeStatus } from './src/status.js';
+import { writeStatus, readStatus } from './src/status.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -269,6 +269,7 @@ async function pingOnce() {
   // A clean, meaningful answer — everything is healthy again.
   authFailures = 0;
   networkFailures = 0;
+  if (readStatus()?.outageAlerted) writeStatus({ outageAlerted: false });
   callLimitHits = 0;
   extraWaitMs = 0;
 
@@ -363,7 +364,10 @@ async function loop() {
         lastPingAt: new Date().toISOString(),
         pings,
       });
-      if (networkFailures === config.networkAlertAfter) {
+      // Persisted, so restarting mid-outage does not re-announce it. Cleared
+      // on the next clean answer, so a later outage still gets its own alert.
+      if (networkFailures >= config.networkAlertAfter && !readStatus()?.outageAlerted) {
+        writeStatus({ outageAlerted: true });
         await notifyTelegram(
           `⚠️ Termin monitor: portal unreachable for ${networkFailures} tries (${err.code ?? err.name}). Still retrying — the session is not spent.`,
         );
