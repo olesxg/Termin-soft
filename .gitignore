@@ -10,3 +10,7 @@ captured/
 screenshots/
 user-data/
 *.log
+
+# Runtime state of a running monitor
+.monitor-status.json
+monitor.log

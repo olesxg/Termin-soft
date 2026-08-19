@@ -10,7 +10,8 @@
     "browser": "node browser-monitor.js",
     "capture": "node capture-session.js",
     "install:browser": "playwright install chromium",
-    "notify:test": "node scripts/notify-test.js"
+    "notify:test": "node scripts/notify-test.js",
+    "health": "node scripts/health.js"
   },
   "dependencies": {
     "axios": "^1.7.7",

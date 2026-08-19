@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { str, num, bool, list, json, required, nextDelay, ts } from './src/config.js';
 import { detectSlots, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { readPortalStatus, backoffDelay } from './src/portal.js';
+import { writeStatus } from './src/status.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -137,6 +138,7 @@ let extraWaitMs = 0;
 
 function shutdown(code, message) {
   running = false;
+  writeStatus({ stoppedAt: new Date().toISOString(), exitCode: code });
   if (stopBeeping) stopBeeping();
   if (message) console.error(message);
   process.exit(code);
@@ -200,6 +202,7 @@ async function pingOnce() {
 
   if (portal.callLimit) {
     callLimitHits += 1;
+    writeStatus({ lastResult: 'call-limit', callLimitHits, lastPingAt: new Date().toISOString(), pings });
     extraWaitMs = backoffDelay(config.intervalMs, callLimitHits);
     console.warn(
       `\n[${ts()}] CALL_LIMIT — polling too fast. Backing off to ${Math.round(extraWaitMs / 1000)}s (hit ${callLimitHits}).`,
@@ -210,6 +213,7 @@ async function pingOnce() {
 
   if (portal.authFailed) {
     authFailures += 1;
+    writeStatus({ lastResult: 'rejected-' + portal.code, lastPingAt: new Date().toISOString(), pings });
     console.error(
       `\n[${ts()}] portal says code ${portal.code} — session rejected (${authFailures}/${config.authFailTolerance})`,
     );
@@ -238,6 +242,15 @@ async function pingOnce() {
     jsonPath: config.jsonPath,
   });
 
+  writeStatus({
+    lastPingAt: new Date().toISOString(),
+    pings,
+    lastResult:
+      result.available === true ? 'SLOT' : result.available === false ? 'no-slots' : 'inconclusive',
+    lastReason: result.reason,
+    callLimitHits,
+  });
+
   if (result.available === true) {
     return result;
   }
@@ -263,6 +276,18 @@ async function loop() {
   console.log(`  no-slots : ${config.noSlotsPhrases.join(' | ') || '(none configured)'}`);
   console.log('  Ctrl+C to stop. Keep the volume up.\n');
 
+  writeStatus({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    target: config.url,
+    intervalMs: config.intervalMs,
+    jitterMs: config.jitterMs,
+    telegram: Boolean(str('TELEGRAM_BOT_TOKEN') && str('TELEGRAM_CHAT_ID')),
+    lastResult: 'starting',
+    pings: 0,
+    callLimitHits: 0,
+  });
+
   while (running) {
     pings += 1;
     try {
@@ -273,6 +298,7 @@ async function loop() {
           hit.sample ? `data  : ${hit.sample}` : 'open the portal tab and click through NOW',
           `url   : ${config.referer || config.url}`,
         ]);
+        writeStatus({ lastResult: 'SLOT', slotFoundAt: new Date().toISOString(), slotDetail: hit.reason });
         console.log('Beeping until you kill me (Ctrl+C). Go book it.');
         return;
       }
