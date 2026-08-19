@@ -112,7 +112,10 @@ const config = {
   callLimitPauseMs: num('CALL_LIMIT_PAUSE_MS', 10 * 60_000),
   authFailTolerance: num('AUTH_FAIL_TOLERANCE', 1),
   networkAlertAfter: num('NETWORK_ALERT_AFTER', 3),
-  networkBackoffCapMs: num('NETWORK_BACKOFF_CAP_MS', 10 * 60_000),
+  // Deliberately lower than CALL_LIMIT_PAUSE_MS: a failed connection costs no
+  // call budget, so the only thing a long wait buys is a longer blind spot
+  // after the portal comes back.
+  networkBackoffCapMs: num('NETWORK_BACKOFF_CAP_MS', 3 * 60_000),
   inconclusiveIsSlot: bool('TREAT_INCONCLUSIVE_AS_SLOT', false),
   heartbeatEvery: num('HEARTBEAT_EVERY', 20),
 };
