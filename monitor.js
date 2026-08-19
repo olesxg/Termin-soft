@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 import { str, num, bool, list, json, required, nextDelay, ts } from './src/config.js';
 import { detectSlots, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
+import { readPortalStatus, backoffDelay } from './src/portal.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -75,8 +76,8 @@ const config = {
   origin: str('ORIGIN'),
   extraHeaders: json('EXTRA_HEADERS', {}),
 
-  intervalMs: num('INTERVAL_MS', 15_000),
-  jitterMs: num('JITTER_MS', 3_000),
+  intervalMs: num('INTERVAL_MS', 60_000),
+  jitterMs: num('JITTER_MS', 15_000),
   timeoutMs: num('REQUEST_TIMEOUT_MS', 20_000),
 
   noSlotsPhrases: list('NO_SLOTS_TEXT', PORTAL_NO_SLOTS_PHRASES),
@@ -131,6 +132,8 @@ let running = true;
 let pings = 0;
 let authFailures = 0;
 let networkFailures = 0;
+let callLimitHits = 0;
+let extraWaitMs = 0;
 
 function shutdown(code, message) {
   running = false;
@@ -192,9 +195,42 @@ async function pingOnce() {
     return;
   }
 
-  // A successful round trip resets both counters.
+  // The transport succeeded, but the portal reports its own outcome in the body.
+  const portal = readPortalStatus(data);
+
+  if (portal.callLimit) {
+    callLimitHits += 1;
+    extraWaitMs = backoffDelay(config.intervalMs, callLimitHits);
+    console.warn(
+      `\n[${ts()}] CALL_LIMIT — polling too fast. Backing off to ${Math.round(extraWaitMs / 1000)}s (hit ${callLimitHits}).`,
+    );
+    networkFailures = 0;
+    return;
+  }
+
+  if (portal.authFailed) {
+    authFailures += 1;
+    console.error(
+      `\n[${ts()}] portal says code ${portal.code} — session rejected (${authFailures}/${config.authFailTolerance})`,
+    );
+    if (authFailures >= config.authFailTolerance) {
+      await notifyTelegram(
+        `⛔️ Termín monitor stopped: portal returned code ${portal.code}. The session is gone — redo the wizard.`,
+      );
+      shutdown(
+        1,
+        '\nThe portal rejected the session — it says so in the response body, not the HTTP status.\n' +
+          'Run: npm run capture, walk the wizard again, then restart the monitor.\n',
+      );
+    }
+    return;
+  }
+
+  // A clean, meaningful answer — everything is healthy again.
   authFailures = 0;
   networkFailures = 0;
+  callLimitHits = 0;
+  extraWaitMs = 0;
 
   const result = detectSlots(data, {
     noSlotsPhrases: config.noSlotsPhrases,
@@ -258,7 +294,8 @@ async function loop() {
     }
 
     if (!running) break;
-    await new Promise((resolve) => setTimeout(resolve, nextDelay(config.intervalMs, config.jitterMs)));
+    const wait = Math.max(extraWaitMs, nextDelay(config.intervalMs, config.jitterMs));
+    await new Promise((resolve) => setTimeout(resolve, wait));
   }
 }
 
