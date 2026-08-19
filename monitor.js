@@ -316,6 +316,14 @@ async function loop() {
     lastResult: 'starting',
     pings: 0,
     callLimitHits: 0,
+    // writeStatus merges, so last run's outcome must be cleared explicitly —
+    // otherwise health reports a fresh monitor as stopped.
+    stoppedAt: null,
+    exitCode: null,
+    lastPingAt: null,
+    lastReason: null,
+    slotFoundAt: null,
+    slotDetail: null,
   });
 
   while (running) {
