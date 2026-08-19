@@ -111,7 +111,8 @@ const config = {
 
   callLimitPauseMs: num('CALL_LIMIT_PAUSE_MS', 10 * 60_000),
   authFailTolerance: num('AUTH_FAIL_TOLERANCE', 1),
-  networkFailTolerance: num('NETWORK_FAIL_TOLERANCE', 5),
+  networkAlertAfter: num('NETWORK_ALERT_AFTER', 3),
+  networkBackoffCapMs: num('NETWORK_BACKOFF_CAP_MS', 10 * 60_000),
   inconclusiveIsSlot: bool('TREAT_INCONCLUSIVE_AS_SLOT', false),
   heartbeatEvery: num('HEARTBEAT_EVERY', 20),
 };
@@ -215,10 +216,12 @@ async function pingOnce() {
 
   if (status >= 500) {
     networkFailures += 1;
-    console.error(`[${ts()}] HTTP ${status} — server error (${networkFailures}/${config.networkFailTolerance})`);
-    if (networkFailures >= config.networkFailTolerance) {
-      shutdown(1, '\nToo many server errors in a row, giving up.\n');
-    }
+    // A 5xx did reach the server, so unlike a connect failure it may well have
+    // cost a call. Back off rather than hammering, but still do not quit.
+    extraWaitMs = backoffDelay(config.intervalMs, networkFailures, config.networkBackoffCapMs);
+    console.error(
+      `[${ts()}] HTTP ${status} — server error (${networkFailures} in a row) — retrying in ${Math.round(extraWaitMs / 1000)}s`,
+    );
     return;
   }
 
@@ -341,19 +344,26 @@ async function loop() {
         return;
       }
     } catch (err) {
+      // A connection that never reached the server costs no call budget, so
+      // giving up would only lose slots — the session is still intact. Back off
+      // and keep trying; portal.minv.sk has gone unreachable while its
+      // neighbour pes.minv.sk stayed up, so outages here are a real thing.
       networkFailures += 1;
+      extraWaitMs = backoffDelay(config.intervalMs, networkFailures, config.networkBackoffCapMs);
       console.error(
-        `\n[${ts()}] request failed: ${err.code ?? ''} ${err.message} (${networkFailures}/${config.networkFailTolerance})`,
+        `\n[${ts()}] request failed: ${err.code ?? ''} ${err.message} (${networkFailures} in a row) — retrying in ${Math.round(extraWaitMs / 1000)}s`,
       );
-      if (/UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT/.test(err.code ?? '')) {
-        console.error(
-          '         The server sent an incomplete certificate chain. Grab its intermediate CA\n' +
-            '         and point EXTRA_CA_FILE at it (certs/ca-disig.pem already covers *.minv.sk).',
+      writeStatus({
+        lastResult: 'unreachable',
+        lastReason: `${err.code ?? err.name}: ${err.message}`,
+        networkFailures,
+        lastPingAt: new Date().toISOString(),
+        pings,
+      });
+      if (networkFailures === config.networkAlertAfter) {
+        await notifyTelegram(
+          `⚠️ Termin monitor: portal unreachable for ${networkFailures} tries (${err.code ?? err.name}). Still retrying — the session is not spent.`,
         );
-      }
-      if (networkFailures >= config.networkFailTolerance) {
-        await notifyTelegram('⛔️ Termín monitor stopped: network keeps failing.');
-        shutdown(1, '\nToo many network failures in a row, giving up.\n');
       }
     }
 
