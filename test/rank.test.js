@@ -87,3 +87,19 @@ test('countDates handles both Slovak and ISO formats', () => {
   assert.equal(countDates(''), 0);
   assert.equal(countDates(undefined), 0);
 });
+
+test('a self-identifying date endpoint wins outright', () => {
+  // The real ECU endpoint: it announces itself in the portlet resource id, and
+  // on a quiet day its body is just {"services":[]} — no dates, no keywords.
+  const real = {
+    resourceType: 'xhr',
+    method: 'POST',
+    url: `${PORTLET}/pw/Z7_40CEHJK0/res/id=available-offices-service-date/c=cacheLevelPage/=/?tida=0&language=sk`,
+    responseContentType: 'application/json',
+    postData: 'data=%7B%22serviceBranchID%22%3A%22df816bbf%22%2C%22authValue%22%3A%22false%22%7D',
+    responseBody: '{"services":[]}',
+  };
+  const score = scoreRequest(real, PORTAL_NO_SLOTS_PHRASES);
+  assert.ok(score > scoreRequest(jspFragment, PORTAL_NO_SLOTS_PHRASES));
+  assert.ok(score > scoreRequest(dateEndpoint, PORTAL_NO_SLOTS_PHRASES));
+});

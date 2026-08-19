@@ -6,6 +6,20 @@ const INTERESTING = ['termin', 'termín', 'date', 'datum', 'dátum', 'slot', 'av
 /** Words that only appear in the POST body of a real reservation/date call. */
 const ACTION_WORDS = ['reservation', 'termin', 'date', 'datum', 'day', 'office', 'pracovisko', 'workplace', 'service'];
 
+/**
+ * Portlet resource ids that name themselves. On the ECU flow the date lookup is
+ * .../res/id=available-offices-service-date/... — when a URL says this plainly,
+ * believe it over every heuristic below.
+ */
+const STRONG_URL_MARKERS = [
+  'available-offices-service-date',
+  'available-offices',
+  'available-dates',
+  'free-terms',
+  'getfreeterms',
+  'freetermin',
+];
+
 const DATE_RE = /\d{4}-\d{2}-\d{2}|\d{1,2}\.\s?\d{1,2}\.\s?\d{4}/g;
 
 export function countDates(body) {
@@ -44,6 +58,12 @@ export function scoreRequest(entry, noSlotsPhrases = []) {
   }
   for (const word of INTERESTING) {
     if (url.includes(normalize(word))) score += 2;
+  }
+  for (const marker of STRONG_URL_MARKERS) {
+    if (url.includes(normalize(marker))) {
+      score += 20; // self-identifying endpoint — outweighs any keyword counting
+      break;
+    }
   }
 
   // Cap the body's contribution: a bundled JS file mentions every keyword there
