@@ -21,9 +21,13 @@ import { str, num, bool, list, json, required, nextDelay, ts } from './src/confi
 import { detectSlots, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { readPortalStatus, backoffDelay } from './src/portal.js';
 import { writeStatus, readStatus } from './src/status.js';
+import { mirrorConsoleTo } from './src/logfile.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+// Do this before anything logs, so the banner lands in the file too.
+mirrorConsoleTo(str('LOG_FILE', 'monitor.log'));
 
 /**
  * pes.minv.sk serves ONLY its leaf certificate — it omits the "CA Disig R2I2"
