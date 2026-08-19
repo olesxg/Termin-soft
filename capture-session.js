@@ -19,6 +19,7 @@ import { str, num, bool, list } from './src/config.js';
 import { PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { scoreRequest, countDates } from './src/rank.js';
 import { readEnvValues } from './src/envfile.js';
+import { extractServices, buildRotation } from './src/bodies.js';
 
 const config = {
   startUrl: str('START_URL', 'https://pes.minv.sk/'),
@@ -130,6 +131,25 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
     bodyLine = `${envLine('REQUEST_BODY_FILE', bodyPath)}  # body had both quote types`;
   }
 
+  // Build a rotation set from every service the wizard offered. Repeating one
+  // identical body is what preceded both session deaths; varying it is both a
+  // wider net and a plausible way past the guard.
+  let rotationLine = '# REQUEST_BODIES_FILE=';
+  const services = captured.flatMap((e) => extractServices(e.responseBody));
+  if (body && services.length > 0) {
+    const rotation = buildRotation(body, services);
+    if (rotation.length > 1) {
+      const rotPath = path.join(config.outDir, 'request-bodies.txt');
+      const header = services
+        .map((s) => `# ${s.id}  ${s.group ? s.group + ' / ' : ''}${s.name}`)
+        .join('\n');
+      await fs.writeFile(rotPath, `${header}\n${rotation.join('\n')}\n`, 'utf8');
+      rotationLine = envLine('REQUEST_BODIES_FILE', rotPath);
+      console.log(`\nRotation set: ${rotation.length} bodies -> ${rotPath}`);
+      for (const s of services) console.log(`   ${s.id}  ${s.name}`);
+    }
+  }
+
   // The endpoint answers {"services":[...]} on the ECU flow; anywhere else let
   // the detector find the array itself.
   const isEcuDateEndpoint = /available-offices-service-date/.test(best.url);
@@ -149,6 +169,7 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
     envLine('CSRF_HEADER_NAME', csrfEntry ? csrfEntry[0] : 'X-CSRF-TOKEN'),
     envLine('CSRF_TOKEN', csrfEntry ? csrfEntry[1] : ''),
     bodyLine,
+    rotationLine,
     envLine('CONTENT_TYPE', headers['content-type'] ?? 'application/json'),
     envLine('REFERER', headers.referer ?? usablePageUrl(best)),
     envLine('ORIGIN', headers.origin ?? new URL(best.url).origin),
