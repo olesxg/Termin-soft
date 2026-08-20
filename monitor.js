@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 
 import { str, num, bool, list, json, required, nextDelay, ts } from './src/config.js';
 import { detectSlots, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
+import { parseBodiesFile, interleavePrimary } from './src/bodies.js';
 import { readPortalStatus, backoffDelay } from './src/portal.js';
 import { writeStatus, readStatus } from './src/status.js';
 import { mirrorConsoleTo } from './src/logfile.js';
@@ -75,16 +76,16 @@ function readBody() {
 function readBodies() {
   const file = str('REQUEST_BODIES_FILE');
   if (file) {
-    const lines = fs
-      .readFileSync(file, 'utf8')
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('#'));
-    if (lines.length === 0) throw new Error(`REQUEST_BODIES_FILE ${file} has no bodies in it`);
-    return lines;
+    let entries = parseBodiesFile(fs.readFileSync(file, 'utf8'));
+    if (entries.length === 0) throw new Error(`REQUEST_BODIES_FILE ${file} has no bodies in it`);
+    // The first body is the service the wizard was actually on — the one you
+    // care about. A flat cycle would check it once per lap; interleaving keeps
+    // it at every second poll.
+    if (bool('INTERLEAVE_PRIMARY', true)) entries = interleavePrimary(entries);
+    return entries;
   }
   const single = readBody();
-  return single ? [single] : [''];
+  return [{ body: single, id: null, label: null }];
 }
 
 const config = {
@@ -146,7 +147,7 @@ function buildHeaders() {
   if (config.referer) headers.Referer = config.referer;
   if (config.origin) headers.Origin = config.origin;
   if (config.csrfToken) headers[config.csrfHeaderName] = config.csrfToken;
-  if (config.method !== 'GET' && config.bodies.some(Boolean)) headers['Content-Type'] = config.contentType;
+  if (config.method !== 'GET' && config.bodies.some((e) => e.body)) headers['Content-Type'] = config.contentType;
 
   return { ...headers, ...config.extraHeaders };
 }
@@ -173,7 +174,7 @@ let callLimitHits = 0;
 let extraWaitMs = 0;
 
 /** Rotate through the configured bodies, one per poll. */
-function currentBody() {
+function currentEntry() {
   return config.bodies[(pings - 1) % config.bodies.length];
 }
 
@@ -190,7 +191,7 @@ async function pingOnce() {
     url: config.url,
     method: config.method,
     headers: buildHeaders(),
-    data: config.method === 'GET' ? undefined : currentBody() || undefined,
+    data: config.method === 'GET' ? undefined : currentEntry().body || undefined,
   });
 
   const { status, data } = response;
@@ -307,7 +308,7 @@ async function pingOnce() {
   }
 
   if (pings === 1 || pings % config.heartbeatEvery === 0) {
-    console.log(`[${ts()}] ping #${pings} — no slots (${result.reason})`);
+    console.log(`[${ts()}] ping #${pings} [${currentEntry().label ?? "?"}] — no slots (${result.reason})`);
   } else {
     process.stdout.write('.');
   }
@@ -346,11 +347,12 @@ async function loop() {
       const hit = await pingOnce();
       if (hit) {
         stopBeeping = await raiseSlotAlarm([
+          `service: ${currentEntry().label ?? currentEntry().id ?? "(unnamed)"}`,
           `reason: ${hit.reason}`,
           hit.sample ? `data  : ${hit.sample}` : 'open the portal tab and click through NOW',
           `url   : ${config.referer || config.url}`,
         ]);
-        writeStatus({ lastResult: 'SLOT', slotFoundAt: new Date().toISOString(), slotDetail: hit.reason });
+        writeStatus({ lastResult: 'SLOT', slotFoundAt: new Date().toISOString(), slotDetail: hit.reason, slotService: currentEntry().label ?? currentEntry().id });
         console.log('Beeping until you kill me (Ctrl+C). Go book it.');
         return;
       }
