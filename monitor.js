@@ -90,6 +90,10 @@ function readBodies() {
 
 const config = {
   url: required('TARGET_URL'),
+  // With a single service every request would otherwise be byte-identical,
+  // which is the pattern that preceded both CALL_LIMIT events. The portal
+  // uses the same `_=` cache-buster on its own asset loads.
+  cacheBust: bool('CACHE_BUST', true),
   method: str('METHOD', 'GET').toUpperCase(),
   cookie: required('COOKIE_HEADER'),
   csrfToken: str('CSRF_TOKEN'),
@@ -174,6 +178,13 @@ let callLimitHits = 0;
 let extraWaitMs = 0;
 
 /** Rotate through the configured bodies, one per poll. */
+/** A unique URL per poll, so no two requests are identical on the wire. */
+function requestUrl() {
+  if (!config.cacheBust) return config.url;
+  const separator = config.url.includes('?') ? '&' : '?';
+  return `${config.url}${separator}_=${Date.now()}`;
+}
+
 function currentEntry() {
   return config.bodies[(pings - 1) % config.bodies.length];
 }
@@ -188,7 +199,7 @@ function shutdown(code, message) {
 
 async function pingOnce() {
   const response = await client.request({
-    url: config.url,
+    url: requestUrl(),
     method: config.method,
     headers: buildHeaders(),
     data: config.method === 'GET' ? undefined : currentEntry().body || undefined,
