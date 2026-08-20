@@ -270,11 +270,18 @@ async function pingOnce() {
   if (portal.callLimit) {
     callLimitHits += 1;
     writeStatus({ lastResult: 'call-limit', callLimitHits, lastPingAt: new Date().toISOString(), pings });
-    extraWaitMs = Math.max(config.callLimitPauseMs, backoffDelay(config.intervalMs, callLimitHits));
-    console.warn(
-      `\n[${ts()}] CALL_LIMIT — session is at its call budget. Sitting out ${Math.round(extraWaitMs / 60000)}min rather than spending the call that kills it (hit ${callLimitHits}).`,
+    // Measured: the call after CALL_LIMIT comes back 401 whether it is sent in
+    // sixty seconds or ten minutes, and the budget never recovers. Waiting only
+    // delays the bad news, so say what is actually needed and stop.
+    console.error(`\n[${ts()}] CALL_LIMIT after ${pings} calls — this session's budget is spent.`);
+    await notifyTelegram(
+      `⚠️ Termín monitor: budget spent after ${pings} checks. Redo the wizard (CAPTCHA + SMS) for another ~6.`,
     );
-    networkFailures = 0;
+    shutdown(
+      1,
+      '\nThe budget does not recover — waiting does not help, only re-authenticating does.\n' +
+        '  npm run capture     then     npm run monitor\n',
+    );
     return;
   }
 
