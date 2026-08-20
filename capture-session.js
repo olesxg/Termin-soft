@@ -31,6 +31,7 @@ const config = {
 };
 
 const captured = [];
+let logOpen = true;
 
 /** Latest credentials seen on the wire, in case the browser dies before the dump. */
 const lastSeen = { cookie: '', userAgent: '' };
@@ -239,7 +240,16 @@ async function main() {
     }
 
     captured.push(entry);
-    await log.write(`${JSON.stringify(entry)}\n`);
+    // The page keeps loading after the dump has closed the log. Writing to a
+    // closed handle throws EBADF from an async listener, which is unhandled
+    // and kills the process — taking the browser, and the live session, too.
+    if (logOpen) {
+      try {
+        await log.write(`${JSON.stringify(entry)}\n`);
+      } catch {
+        logOpen = false;
+      }
+    }
     console.log(`  [${entry.status}] ${entry.method} ${entry.url.slice(0, 120)}`);
   });
 
@@ -311,6 +321,7 @@ async function main() {
     console.log('\nNext: cp .env.captured .env && npm run monitor');
   }
 
+  logOpen = false;
   await log.close();
 
   if (bool('CLOSE_BROWSER_ON_EXIT', false)) {
