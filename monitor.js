@@ -111,6 +111,12 @@ const config = {
   extraHeaders: json('EXTRA_HEADERS', {}),
 
   intervalMs: num('INTERVAL_MS', 60_000),
+  // Measured: a session is cut off after roughly six calls to this endpoint, and
+  // neither slower polling, varied payloads, unique URLs nor waiting out
+  // CALL_LIMIT restores it. The calls are the scarce resource, not time — so
+  // spread them across a window instead of spending them in six minutes.
+  callBudget: num('CALL_BUDGET', 6),
+  budgetWindowMin: num('BUDGET_WINDOW_MIN', 0),
   jitterMs: num('JITTER_MS', 15_000),
   // The portal answers slowly when it is struggling: third-party fetches of the
   // same page came back at 8.7s and 19.6s while our 20s ceiling was cutting
@@ -131,6 +137,12 @@ const config = {
   inconclusiveIsSlot: bool('TREAT_INCONCLUSIVE_AS_SLOT', false),
   heartbeatEvery: num('HEARTBEAT_EVERY', 20),
 };
+
+// Stretch a scarce budget over the window you actually care about.
+if (config.budgetWindowMin > 0 && config.callBudget > 0) {
+  const spaced = Math.round((config.budgetWindowMin * 60_000) / config.callBudget);
+  if (spaced > config.intervalMs) config.intervalMs = spaced;
+}
 
 if (!['GET', 'POST', 'PUT'].includes(config.method)) {
   throw new Error(`METHOD must be GET, POST or PUT — got "${config.method}"`);
@@ -330,6 +342,9 @@ async function loop() {
   console.log(`  target   : ${config.method} ${config.url}`);
   console.log(`  interval : ${config.intervalMs / 1000}s (+ up to ${config.jitterMs / 1000}s jitter)`);
   console.log(`  no-slots : ${config.noSlotsPhrases.join(' | ') || '(none configured)'}`);
+  if (config.budgetWindowMin > 0) {
+    console.log(`  budget   : ~${config.callBudget} calls spread over ${config.budgetWindowMin} min`);
+  }
   console.log('  Ctrl+C to stop. Keep the volume up.\n');
 
   writeStatus({
