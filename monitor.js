@@ -107,6 +107,9 @@ const config = {
   accept: str('ACCEPT', 'application/json, text/javascript, */*; q=0.01'),
   acceptLanguage: str('ACCEPT_LANGUAGE', 'sk-SK,sk;q=0.9,en;q=0.8'),
   referer: str('REFERER'),
+  // A clean, bookmarkable entry to the booking flow — what goes in the alert,
+  // instead of the giant stateful portlet URL you cannot tap on a phone.
+  bookUrl: str('BOOK_URL', 'https://portal.minv.sk/wps/portal/domov/ecu/ecu_elektronicke_sluzby/ecu-vysys/'),
   origin: str('ORIGIN'),
   extraHeaders: json('EXTRA_HEADERS', {}),
 
@@ -382,8 +385,9 @@ async function loop() {
         stopBeeping = await raiseSlotAlarm([
           `service: ${currentEntry().label ?? currentEntry().id ?? "(unnamed)"}`,
           `reason: ${hit.reason}`,
-          hit.sample ? `data  : ${hit.sample}` : 'open the portal tab and click through NOW',
-          `url   : ${config.referer || config.url}`,
+          hit.sample ? `dates : ${hit.sample}` : 'open the portal and click through NOW',
+          // A clean, tappable link — never the giant session-bound portlet URL.
+          `👉 ${config.bookUrl}`,
         ]);
         writeStatus({ lastResult: 'SLOT', slotFoundAt: new Date().toISOString(), slotDetail: hit.reason, slotService: currentEntry().label ?? currentEntry().id });
         console.log('Beeping until you kill me (Ctrl+C). Go book it.');
