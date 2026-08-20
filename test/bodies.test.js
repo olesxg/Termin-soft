@@ -54,3 +54,54 @@ test('malformed json is not fatal', () => {
   assert.deepEqual(extractServices('<html>'), []);
   assert.deepEqual(extractServices(''), []);
 });
+
+import { parseBodiesFile, interleavePrimary } from '../src/bodies.js';
+
+// Exactly the file capture-session writes.
+const FILE = [
+  '# 4aef7554-48e0-4b98-a03e-3e8eb65b913c  Dočasné útočisko / Registrácia dočasného útočiska',
+  '# 796dc593-0a47-4e57-b2ec-063b8eea48af  Dočasné útočisko / Žiadosť o vydanie dokladu',
+  '# 3136e7da-7adf-41d6-9c73-1ae1f6305e0b  Termíny na oddelenia / Biosnímanie',
+  'data=%7B%22serviceBranchID%22%3A%224aef7554-48e0-4b98-a03e-3e8eb65b913c%22%2C%22authValue%22%3A%22false%22%7D',
+  'data=%7B%22serviceBranchID%22%3A%22796dc593-0a47-4e57-b2ec-063b8eea48af%22%2C%22authValue%22%3A%22false%22%7D',
+  'data=%7B%22serviceBranchID%22%3A%223136e7da-7adf-41d6-9c73-1ae1f6305e0b%22%2C%22authValue%22%3A%22false%22%7D',
+].join('\n');
+
+test('each body is matched to its service name', () => {
+  const entries = parseBodiesFile(FILE);
+  assert.equal(entries.length, 3);
+  assert.match(entries[0].label, /Registrácia dočasného útočiska/);
+  assert.match(entries[1].label, /Žiadosť o vydanie dokladu/);
+  assert.equal(entries[0].id, '4aef7554-48e0-4b98-a03e-3e8eb65b913c');
+});
+
+test('labels follow the id, not the line order', () => {
+  // Comments deliberately out of order relative to the bodies.
+  const shuffled = [
+    '# 796dc593-0a47-4e57-b2ec-063b8eea48af  Second service',
+    '# 4aef7554-48e0-4b98-a03e-3e8eb65b913c  First service',
+    'data=%7B%22serviceBranchID%22%3A%224aef7554-48e0-4b98-a03e-3e8eb65b913c%22%7D',
+    'data=%7B%22serviceBranchID%22%3A%22796dc593-0a47-4e57-b2ec-063b8eea48af%22%7D',
+  ].join('\n');
+  const entries = parseBodiesFile(shuffled);
+  assert.equal(entries[0].label, 'First service');
+  assert.equal(entries[1].label, 'Second service');
+});
+
+test('an unlabelled body still parses', () => {
+  const entries = parseBodiesFile('data=%7B%22pincode%22%3A%221%22%7D');
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].label, null);
+  assert.equal(entries[0].id, null);
+});
+
+test('the primary service is polled every other time', () => {
+  const entries = parseBodiesFile(FILE);
+  const order = interleavePrimary(entries).map((e) => e.id.slice(0, 8));
+  assert.deepEqual(order, ['4aef7554', '796dc593', '4aef7554', '3136e7da']);
+});
+
+test('interleaving a single body changes nothing', () => {
+  const one = parseBodiesFile('data=%7B%22serviceBranchID%22%3A%22abc%22%7D');
+  assert.deepEqual(interleavePrimary(one), one);
+});

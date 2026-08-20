@@ -58,3 +58,53 @@ export function buildRotation(templateBody, services) {
   }
   return bodies;
 }
+
+/**
+ * Parse a rotation file back into labelled bodies.
+ *
+ * The file carries "# <id>  <group> / <name>" comments alongside the payloads.
+ * An alert that only says "2 entries at services" is not actionable — the dates
+ * may belong to a service you are not applying for, which is exactly how one
+ * alert sent someone to the portal to book something that was never free.
+ * Match label to body by serviceBranchID rather than by position.
+ */
+export function parseBodiesFile(text) {
+  const labels = new Map();
+  const bodies = [];
+
+  for (const rawLine of String(text ?? '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    if (line.startsWith('#')) {
+      const m = line.match(/^#\s*([0-9a-f-]{16,})\s+(.*)$/i);
+      if (m) labels.set(m[1], m[2].trim());
+      continue;
+    }
+    bodies.push(line);
+  }
+
+  return bodies.map((body) => {
+    const m = decodeURIComponent(body).match(/"serviceBranchID"\s*:\s*"([^"]+)"/);
+    const id = m ? m[1] : null;
+    return { body, id, label: (id && labels.get(id)) || null };
+  });
+}
+
+/**
+ * Interleave the primary body with the rest: primary, A, primary, B, ...
+ *
+ * A flat cycle checks the service you actually need only once per full lap —
+ * nine minutes at a one-minute cadence, which is a long time for a slot that
+ * others are also racing for. This keeps it at every second poll while still
+ * covering the others.
+ */
+export function interleavePrimary(entries) {
+  if (entries.length < 2) return entries;
+  const [primary, ...rest] = entries;
+  const out = [];
+  for (const entry of rest) {
+    out.push(primary, entry);
+  }
+  return out;
+}
