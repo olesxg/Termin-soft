@@ -16,7 +16,7 @@ const AUTH_CODES = new Set(['401', '403']);
  * @returns {{authFailed: boolean, callLimit: boolean, code: string|null, message: string}}
  */
 export function readPortalStatus(rawBody) {
-  const empty = { authFailed: false, callLimit: false, code: null, message: '' };
+  const empty = { authFailed: false, callLimit: false, expired: false, code: null, message: '' };
   if (!rawBody) return empty;
 
   let parsed;
@@ -33,6 +33,19 @@ export function readPortalStatus(rawBody) {
   return {
     code,
     message,
+    /**
+     * `{}` — a soft session death, and the nastiest shape yet.
+     *
+     * The cookie still authenticates, so there is no 401 and no code at all;
+     * the portal has simply dropped the wizard context, so it has nothing to
+     * say about dates. Measured 2026-09-03: three sessions captured 15:45,
+     * 15:46 and 15:48 all switched from {"services":[]} to {} between their
+     * 62nd and 65th minute — an age, not a per-session accident.
+     *
+     * Treated as expiry rather than "inconclusive": reporting it as unknown
+     * left the monitor politely polling three dead sessions for half an hour.
+     */
+    expired: Object.keys(parsed).length === 0,
     authFailed: code !== null && AUTH_CODES.has(code),
     // CALL_LIMIT arrives as code 500, but match on the message so a future
     // change of code does not silently turn throttling into a hard error.

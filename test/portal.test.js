@@ -47,3 +47,28 @@ test('backoff grows then stops at the cap', () => {
   assert.equal(backoffDelay(60_000, 99), 600_000, 'capped at 10 minutes');
   assert.equal(backoffDelay(60_000, 0), 60_000, 'no negative exponent');
 });
+
+test('an empty object is a session that quietly lost its wizard context', () => {
+  const s = readPortalStatus('{}');
+  assert.equal(s.expired, true);
+  assert.equal(s.authFailed, false);
+  assert.equal(s.callLimit, false);
+  assert.equal(s.code, null);
+});
+
+test('a real payload is not mistaken for expiry', () => {
+  assert.equal(readPortalStatus('{"services":[]}').expired, false);
+  assert.equal(readPortalStatus('{"services":[{"dates":["18.09.2026"]}]}').expired, false);
+});
+
+test('the other failure shapes are not expiry either', () => {
+  assert.equal(readPortalStatus('{"code":"401"}').expired, false);
+  assert.equal(readPortalStatus('{"code":"500","message":"CALL_LIMIT"}').expired, false);
+});
+
+test('non-JSON and empty bodies do not claim expiry', () => {
+  assert.equal(readPortalStatus('<html>oops</html>').expired, false);
+  assert.equal(readPortalStatus('').expired, false);
+  assert.equal(readPortalStatus(null).expired, false);
+  assert.equal(readPortalStatus('[]').expired, false);
+});

@@ -5,11 +5,20 @@ node_modules/
 .env.*
 !.env.example
 
-# Captured session data — contains cookies and tokens, never commit
+# Captured session data — contains cookies and tokens, never commit.
+# The archived form carries the same personal data (name, DOB, document
+# number, phone, SMS PIN), so it must be ignored too.
 captured/
+captured*.zip
+node_modules*.zip
 screenshots/
 user-data/
 *.log
+
+# Captured sessions for the rotation — one live cookie jar per entry, i.e.
+# several logins in one file. Never commit.
+sessions.json
+sessions*.json
 
 # Runtime state of a running monitor
 .monitor-status.json

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { extractServices, bodyForService, buildRotation } from '../src/bodies.js';
+import { extractServices, bodyForService, buildRotation, matchServices } from '../src/bodies.js';
 
 const TREE = JSON.stringify({
   services: [
@@ -104,4 +104,37 @@ test('the primary service is polled every other time', () => {
 test('interleaving a single body changes nothing', () => {
   const one = parseBodiesFile('data=%7B%22serviceBranchID%22%3A%22abc%22%7D');
   assert.deepEqual(interleavePrimary(one), one);
+});
+
+const SERVICES = [
+  { id: 'a1', name: 'Registrácia dočasného útočiska', group: 'Dočasné útočisko' },
+  { id: 'b2', name: 'Žiadosť o vydanie dokladu dočasné útočiska', group: 'Dočasné útočisko' },
+  { id: 'c3', name: 'Biosnímanie', group: 'Termíny na oddelenia cudzineckej polície' },
+  { id: 'd4', name: 'Udelenie národného víza', group: 'Víza' },
+];
+
+test('ONLY_SERVICE picks one service out of the rotation', () => {
+  const hit = matchServices(SERVICES, 'Registrácia');
+  assert.deepEqual(hit.map((s) => s.id), ['a1']);
+});
+
+test('the needle may be typed without diacritics or capitals', () => {
+  assert.deepEqual(matchServices(SERVICES, 'registracia docasneho').map((s) => s.id), ['a1']);
+});
+
+test('it matches on the group name too', () => {
+  assert.deepEqual(matchServices(SERVICES, 'Víza').map((s) => s.id), ['d4']);
+});
+
+test('a needle matching nothing returns nothing, so the caller can warn', () => {
+  assert.deepEqual(matchServices(SERVICES, 'Reisepass'), []);
+});
+
+test('an empty needle selects nothing rather than everything', () => {
+  assert.deepEqual(matchServices(SERVICES, ''), []);
+  assert.deepEqual(matchServices(SERVICES, '   '), []);
+});
+
+test('a broad needle may legitimately match several services', () => {
+  assert.deepEqual(matchServices(SERVICES, 'dočasné').map((s) => s.id), ['a1', 'b2']);
 });

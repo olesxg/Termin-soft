@@ -19,7 +19,7 @@ import { str, num, bool, list } from './src/config.js';
 import { PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { scoreRequest, countDates } from './src/rank.js';
 import { readEnvValues } from './src/envfile.js';
-import { extractServices, buildRotation } from './src/bodies.js';
+import { extractServices, buildRotation, bodyForService, matchServices } from './src/bodies.js';
 
 const config = {
   startUrl: str('START_URL', 'https://pes.minv.sk/'),
@@ -98,10 +98,160 @@ function usablePageUrl(entry) {
   return new URL(entry.url).origin;
 }
 
-/** Keep TELEGRAM_* across a re-capture so the one alert that matters still lands. */
-function carryOverAlerting() {
-  const found = readEnvValues(['.env', '.env.captured'], ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']);
-  return { token: found.TELEGRAM_BOT_TOKEN ?? '', chatId: found.TELEGRAM_CHAT_ID ?? '' };
+/**
+ * Keep the settings that must survive a re-capture. Cookies die often, so this
+ * runs a lot; anything not carried here is silently lost every time.
+ *
+ * TELEGRAM_* — the one alert that matters would otherwise go nowhere.
+ * ONLY_SERVICE — losing it re-widens the rotation to every service the wizard
+ * offers, and monitor.js stops watching on the first hit whichever service it
+ * belongs to. That has already cost a session: a slot on the document-issuing
+ * service halted the watch while the registration it was meant to catch went
+ * unchecked for over an hour.
+ */
+function carryOverSettings() {
+  const found = readEnvValues(
+    ['.env', '.env.captured'],
+    [
+      'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'ONLY_SERVICE', 'AUTOSTART_MONITOR',
+      'START_URL', 'NETWORK_BACKOFF_CAP_MS',
+      'INTERVAL_MS', 'JITTER_MS', 'HEARTBEAT_EVERY',
+      'POLL_ALIGN_MINUTE_MOD', 'POLL_ALIGN_MINUTE_OFFSET', 'POLL_ALIGN_SECOND',
+      'POLL_BURST', 'POLL_BURST_SPACING_MS',
+    ],
+  );
+  return {
+    token: found.TELEGRAM_BOT_TOKEN ?? '',
+    chatId: found.TELEGRAM_CHAT_ID ?? '',
+    onlyService: found.ONLY_SERVICE ?? '',
+    autostart: found.AUTOSTART_MONITOR ?? '',
+    // A pace you tuned by hand must not be reset to the default on every
+    // re-capture — re-capturing is the routine case, not the exception.
+    // The wizard's deep link. Losing it on every re-capture meant digging the
+    // URL out of old notes before each run — it belongs in the config.
+    startUrl: found.START_URL ?? '',
+    networkBackoffCapMs: found.NETWORK_BACKOFF_CAP_MS ?? '',
+    intervalMs: found.INTERVAL_MS ?? '',
+    jitterMs: found.JITTER_MS ?? '',
+    heartbeatEvery: found.HEARTBEAT_EVERY ?? '',
+    align: {
+      mod: found.POLL_ALIGN_MINUTE_MOD ?? '', offset: found.POLL_ALIGN_MINUTE_OFFSET ?? '',
+      second: found.POLL_ALIGN_SECOND ?? '', burst: found.POLL_BURST ?? '', spacing: found.POLL_BURST_SPACING_MS ?? '',
+    },
+  };
+}
+
+/**
+ * Save the markup of the date step, so the booking UI can be driven later.
+ *
+ * Replaying the reservation as an HTTP call is not possible: no capture has
+ * ever reached it, so its resource id and payload are unknown, and inventing
+ * them would mean firing a made-up request carrying real identity data.
+ * Clicking the portal's own buttons avoids that entirely — but it needs the
+ * selectors, and only the network was ever recorded, never the page.
+ *
+ * Reading the DOM clicks nothing, spends no call budget and cannot touch the
+ * session, so this is free to collect and safe to do on every capture.
+ */
+async function dumpDateStepDom(page) {
+  try {
+    const htmlPath = path.join(config.outDir, 'date-step.html');
+    await fs.writeFile(htmlPath, await page.content(), 'utf8');
+
+    // A full page dump is unreadable; pull out the things a booking click would
+    // plausibly target so the selectors can be picked by eye.
+    const candidates = await page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const describe = (el) => ({
+        tag: el.tagName.toLowerCase(),
+        id: el.id || null,
+        cls: el.className && typeof el.className === 'string' ? el.className.slice(0, 120) : null,
+        text: (el.innerText || el.value || '').trim().slice(0, 60),
+        name: el.getAttribute('name'),
+        type: el.getAttribute('type'),
+      });
+      const out = { clickable: [], selects: [], dateish: [] };
+      for (const el of document.querySelectorAll('button, a[href], input[type=button], input[type=submit], [role=button]')) {
+        if (visible(el)) out.clickable.push(describe(el));
+      }
+      for (const el of document.querySelectorAll('select')) {
+        if (visible(el)) out.selects.push({ ...describe(el), options: [...el.options].slice(0, 8).map((o) => o.text.trim()) });
+      }
+      // Anything whose own text looks like a date — calendar cells, time slots.
+      for (const el of document.querySelectorAll('td, li, div, span, button')) {
+        const own = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join('').trim();
+        if (/^\d{1,2}[.:]\d{2}(:\d{2})?$|^\d{1,2}\.\s?\d{1,2}\.\s?\d{4}$|^\d{1,2}$/.test(own) && visible(el)) {
+          out.dateish.push(describe(el));
+        }
+      }
+      out.dateish = out.dateish.slice(0, 40);
+      return out;
+    });
+
+    const jsonPath = path.join(config.outDir, 'date-step-selectors.json');
+    await fs.writeFile(jsonPath, `${JSON.stringify(candidates, null, 2)}\n`, 'utf8');
+
+    console.log(`\nSaved the date step for building a booking clicker:`);
+    console.log(`  ${htmlPath}`);
+    console.log(`  ${jsonPath}  (${candidates.clickable.length} buttons, ${candidates.selects.length} selects, ${candidates.dateish.length} date/time-looking nodes)`);
+  } catch (err) {
+    // Never let a diagnostic dump cost a session that took a CAPTCHA and an SMS.
+    console.warn(`\n(could not save the date-step DOM: ${err.message} — capture continues)`);
+  }
+}
+
+/**
+ * Append this capture to the rotation file.
+ *
+ * CALL_LIMIT is counted per session, so each capture adds its own ~5 calls to
+ * the pool. Accumulating them here is what makes a bulk-capture session worth
+ * the SMS: monitor.js rotates over every entry, and a session only leaves the
+ * rotation when the portal rejects it.
+ *
+ * Appends rather than overwrites, and skips a cookie already in the file, so
+ * running `npm run capture` ten times in a row builds the pool ten deep
+ * without any bookkeeping by hand.
+ */
+async function appendSession(best, cookieHeader, userAgent, body) {
+  const file = str('SESSIONS_FILE', 'sessions.json');
+  let existing = [];
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, 'utf8'));
+    if (Array.isArray(parsed)) existing = parsed;
+  } catch {
+    // no file yet — this capture starts the pool
+  }
+
+  if (existing.some((s) => s?.cookie === cookieHeader)) {
+    console.log(`\n${file}: this session is already in the pool (${existing.length} total).`);
+    return existing.length;
+  }
+
+  const headers = best.requestHeaders ?? {};
+  const csrfEntry = Object.entries(headers).find(([name]) =>
+    /csrf|xsrf|verification.?token/i.test(name),
+  );
+
+  existing.push({
+    // Local time, to match monitor.log — a UTC label next to local timestamps
+    // reads as a two-hour gap that never happened.
+    label: `s${existing.length + 1} ${new Date().toLocaleTimeString('sk-SK', { hour12: false }).slice(0, 5)}`,
+    capturedAt: new Date().toISOString(),
+    cookie: cookieHeader,
+    url: best.url,
+    csrfHeaderName: csrfEntry ? csrfEntry[0] : undefined,
+    csrfToken: csrfEntry ? csrfEntry[1] : undefined,
+    referer: headers.referer ?? usablePageUrl(best),
+    userAgent,
+    body,
+  });
+
+  await fs.writeFile(file, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
+  console.log(`\n${file}: pool is now ${existing.length} session(s) — roughly ${existing.length * 5} calls.`);
+  return existing.length;
 }
 
 async function writeEnvTemplate(best, cookieHeader, userAgent) {
@@ -140,27 +290,45 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
   // wider net and a plausible way past the guard.
   let rotationLine = '# REQUEST_BODIES_FILE=';
   const services = captured.flatMap((e) => extractServices(e.responseBody));
+  const carried = carryOverSettings();
+  const label = (s) => `${s.group ? s.group + ' / ' : ''}${s.name}`;
+
   if (body && services.length > 0) {
     const rotation = buildRotation(body, services);
     if (rotation.length > 1) {
       const rotPath = path.join(config.outDir, 'request-bodies.txt');
-      const header = services
-        .map((s) => `# ${s.id}  ${s.group ? s.group + ' / ' : ''}${s.name}`)
-        .join('\n');
+      const header = services.map((s) => `# ${s.id}  ${label(s)}`).join('\n');
       await fs.writeFile(rotPath, `${header}\n${rotation.join('\n')}\n`, 'utf8');
       rotationLine = envLine('REQUEST_BODIES_FILE', rotPath);
       console.log(`\nRotation set: ${rotation.length} bodies -> ${rotPath}`);
       for (const s of services) console.log(`   ${s.id}  ${s.name}`);
+    }
+
+    // ONLY_SERVICE overrides the rotation: every call goes to the one service
+    // that matters, and the ids are regenerated per session so this has to be
+    // rebuilt from the fresh capture rather than reused from the old file.
+    if (carried.onlyService) {
+      const wanted = matchServices(services, carried.onlyService);
+      const bodies = wanted.map((s) => bodyForService(body, s.id)).filter(Boolean);
+      if (bodies.length > 0) {
+        const onlyPath = path.join(config.outDir, 'request-bodies-only.txt');
+        const header = wanted.map((s) => `# ${s.id}  ${label(s)}`).join('\n');
+        await fs.writeFile(onlyPath, `${header}\n${bodies.join('\n')}\n`, 'utf8');
+        rotationLine = envLine('REQUEST_BODIES_FILE', onlyPath);
+        console.log(`\nONLY_SERVICE="${carried.onlyService}" -> polling ${bodies.length} service(s):`);
+        for (const s of wanted) console.log(`   ${s.id}  ${label(s)}`);
+      } else {
+        console.warn(
+          `\n!! ONLY_SERVICE="${carried.onlyService}" matched NOTHING in this capture.` +
+            '\n!! Falling back to the full rotation — check the spelling against the list above.',
+        );
+      }
     }
   }
 
   // The endpoint answers {"services":[...]} on the ECU flow; anywhere else let
   // the detector find the array itself.
   const isEcuDateEndpoint = /available-offices-service-date/.test(best.url);
-
-  // Re-capturing is routine (cookies die often). Losing the Telegram wiring
-  // every time would mean the one alert that matters goes nowhere.
-  const carried = carryOverAlerting();
 
   const lines = [
     '# Generated by capture-session.js — review, then: cp .env.captured .env',
@@ -180,15 +348,41 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
     envLine('USER_AGENT', userAgent),
     envLine('EXTRA_HEADERS', Object.keys(extra).length ? JSON.stringify(extra) : ''),
     '',
-    '# The portal throttles: faster than this earns CALL_LIMIT and can cost you',
-    '# the whole session. Do not lower these.',
-    envLine('INTERVAL_MS', '60000'),
-    envLine('JITTER_MS', '15000'),
+    '# Pace the calls, do not race them. CALL_LIMIT counts CALLS, not speed:',
+    '# 6s, 60s and rotated bodies all died on the 5th call. So a fast interval',
+    '# buys nothing and spends the whole session in five minutes — one capture',
+    '# on 2026-08-27 was exhausted by 18:55 while the slot it was hunting had',
+    '# appeared at 21:58 the week before.',
+    '#',
+    '# Each date call also resets the 15-30 min idle timer, so a wide interval',
+    '# keeps the session warm by itself. 10min + up to 2min jitter caps the gap',
+    '# at 12min — inside the idle window — and stretches ~5 calls across ~an hour.',
+    envLine('INTERVAL_MS', carried.intervalMs || '600000'),
+    envLine('JITTER_MS', carried.jitterMs || '120000'),
+    '# One line per poll. The default of 20 was tuned for a 60s interval; at a',
+    '# 10min pace it prints once every 3.3 hours and a working monitor reads as',
+    '# a dead one — which is exactly how it was misread on 2026-08-27.',
+    envLine('HEARTBEAT_EVERY', carried.heartbeatEvery || '1'),
+    '',
+    '# Wall-clock aligned polling. Places the calls; never creates more.',
+    carried.align.mod ? envLine('POLL_ALIGN_MINUTE_MOD', carried.align.mod) : '# POLL_ALIGN_MINUTE_MOD=10',
+    carried.align.offset ? envLine('POLL_ALIGN_MINUTE_OFFSET', carried.align.offset) : '# POLL_ALIGN_MINUTE_OFFSET=8',
+    carried.align.second ? envLine('POLL_ALIGN_SECOND', carried.align.second) : '# POLL_ALIGN_SECOND=58',
+    carried.align.burst ? envLine('POLL_BURST', carried.align.burst) : '# POLL_BURST=1',
+    carried.align.spacing ? envLine('POLL_BURST_SPACING_MS', carried.align.spacing) : '# POLL_BURST_SPACING_MS=1500',
     envLine('NO_SLOTS_TEXT', config.noSlotsPhrases.join(',')),
     isEcuDateEndpoint ? envLine('SLOT_JSON_PATH', 'services') : '# SLOT_JSON_PATH=data.terms',
     '',
     carried.token ? envLine('TELEGRAM_BOT_TOKEN', carried.token) : '# TELEGRAM_BOT_TOKEN=',
     carried.chatId ? envLine('TELEGRAM_CHAT_ID', carried.chatId) : '# TELEGRAM_CHAT_ID=',
+    '',
+    '# Carried across re-captures — see carryOverSettings().',
+    carried.startUrl ? envLine('START_URL', carried.startUrl) : '# START_URL=',
+    carried.networkBackoffCapMs
+      ? envLine('NETWORK_BACKOFF_CAP_MS', carried.networkBackoffCapMs)
+      : '# NETWORK_BACKOFF_CAP_MS=60000',
+    carried.onlyService ? envLine('ONLY_SERVICE', carried.onlyService) : '# ONLY_SERVICE=',
+    carried.autostart ? envLine('AUTOSTART_MONITOR', carried.autostart) : '# AUTOSTART_MONITOR=true',
     '',
   ];
 
@@ -267,6 +461,8 @@ async function main() {
   );
   rl.close();
 
+  await dumpDateStepDom(page);
+
   // The browser may already be gone — closed by hand, or crashed. Everything
   // needed was recorded as each request went out, so fall back to that rather
   // than throwing away a session that cost a CAPTCHA and an SMS.
@@ -310,15 +506,31 @@ async function main() {
     if (entry.postData) console.log(`             body: ${entry.postData.slice(0, 90)}`);
   }
 
+  let envTarget = null;
   if (ranked.length === 0) {
     console.error('\nNothing captured — did the wizard actually load?');
   } else {
-    const target = await writeEnvTemplate(ranked[0].entry, cookieHeader, userAgent);
-    console.log(`\nWrote ${target} (top candidate).`);
+    envTarget = await writeEnvTemplate(ranked[0].entry, cookieHeader, userAgent);
+    console.log(`\nWrote ${envTarget} (top candidate).`);
     console.log(`Full request log: ${logPath}`);
     console.log('If the top candidate looks wrong — no dates in it, or it answered');
     console.log('HTML — pick a better one from the log and fix TARGET_URL by hand.');
-    console.log('\nNext: cp .env.captured .env && npm run monitor');
+
+    // Each session needs the body for ITS OWN serviceBranchID — the ids are
+    // regenerated per capture, so a shared body would ask the wrong service.
+    if (bool('SESSIONS_APPEND', true)) {
+      let sessionBody = ranked[0].entry.postData ?? '';
+      const narrowed = path.join(config.outDir, 'request-bodies-only.txt');
+      try {
+        const line = (await fs.readFile(narrowed, 'utf8'))
+          .split(/\r?\n/)
+          .find((l) => l.startsWith('data='));
+        if (line) sessionBody = line;
+      } catch {
+        // no ONLY_SERVICE narrowing — the captured body is the right one
+      }
+      await appendSession(ranked[0].entry, cookieHeader, userAgent, sessionBody);
+    }
   }
 
   logOpen = false;
@@ -332,8 +544,68 @@ async function main() {
   // Deliberately NOT closing the browser: the portal session lives in it, and
   // killing the window throws away the CAPTCHA and SMS you just went through.
   console.log('\nLeaving the browser open so the session stays alive.');
+
+  if (envTarget && bool('AUTOSTART_MONITOR', true)) {
+    await startMonitor(envTarget);
+    return;
+  }
+
+  // Pool mode: the session lives in the cookies now saved to sessions.json, not
+  // in this window. Holding the browser open would block the terminal, and
+  // building a pool means running this twenty times in a row — so close it and
+  // exit, leaving the shell free for the next capture.
+  if (bool('SESSIONS_APPEND', true)) {
+    await browser.close();
+    console.log('\nBrowser closed — this session now lives in sessions.json.');
+    console.log('Run `npm run capture` again to add another, or `npm run monitor` to start.');
+    console.log('Leave ONE browser open at the date step when you are done: that is where you book.');
+    return;
+  }
+
   console.log('Close it yourself once monitor.js is running. Ctrl+C to exit this script.');
+  console.log('\nNext: cp .env.captured .env && npm run monitor');
   await new Promise(() => {});
+}
+
+/**
+ * Hand straight over to the monitor, in THIS process.
+ *
+ * The gap between capture and monitor is where sessions die: a CAPTCHA and an
+ * SMS buy roughly four calls and expire after 15-30 idle minutes, and three
+ * sessions in a row were lost to nobody running `npm run monitor` in time — one
+ * of them sat unpolled for 2h43m and came back 401 on the first ping.
+ *
+ * Running in-process rather than spawning keeps the browser (and therefore the
+ * session) alive on this process, and puts the beep in the terminal you are
+ * already looking at. monitor.js reads its config from process.env at import
+ * time, so .env has to be copied and reloaded BEFORE the import.
+ */
+async function startMonitor(envTarget) {
+  try {
+    await fs.copyFile(envTarget, '.env');
+    const dotenv = await import('dotenv');
+    dotenv.config({ path: '.env', override: true });
+
+    console.log(`Copied ${envTarget} -> .env and starting the monitor here.`);
+    console.log('Leave this window open: it holds the browser AND does the polling.\n');
+
+    // Hand the live page to the monitor so a found slot can be pre-filled in
+    // the window you already have open. A global is blunt, but monitor.js is a
+    // standalone entry point with no way to be passed arguments, and the
+    // alternative — driving the browser from another process — is impossible:
+    // Playwright launches it with --remote-debugging-pipe, so nothing outside
+    // this process can attach to it.
+    globalThis.__terminPage = page;
+
+    await import('./monitor.js');
+  } catch (err) {
+    // The session is still good at this point — never let a handover bug be
+    // what throws away the SMS. Fall back to holding the browser open.
+    console.error(`\nCould not start the monitor automatically: ${err.message}`);
+    console.error('Do it by hand, in another window, NOW — the session is ticking:');
+    console.error('  cp .env.captured .env && npm run monitor\n');
+    await new Promise(() => {});
+  }
 }
 
 main().catch((err) => {
