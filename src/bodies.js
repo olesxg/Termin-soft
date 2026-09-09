@@ -4,6 +4,7 @@
  * the material for a rotation set: same endpoint, legitimately different
  * payloads, and broader coverage than watching a single service.
  */
+import { normalize } from './detect.js';
 
 /** Every {id, name, group} in a captured services tree. */
 export function extractServices(responseBody) {
@@ -107,4 +108,20 @@ export function interleavePrimary(entries) {
     out.push(primary, entry);
   }
   return out;
+}
+
+/**
+ * Services whose group or name contains `needle`, compared with the same
+ * normalisation the detector uses — so "Registracia" typed without diacritics
+ * still matches "Registrácia dočasného útočiska".
+ *
+ * The rotation is a wider net, but it is the wrong default when only one
+ * service matters: monitor.js returns out of its loop on the FIRST hit, so a
+ * slot on a service you are not applying for stops the watch on the one you
+ * are. Narrowing spends every call on the service you actually need.
+ */
+export function matchServices(services, needle) {
+  const want = normalize(needle);
+  if (!want) return [];
+  return services.filter((s) => normalize(`${s.group ?? ''} ${s.name ?? ''}`).includes(want));
 }
