@@ -107,6 +107,10 @@ function readBodies() {
 
 const config = {
   url: required('TARGET_URL'),
+  // With a single service every request would otherwise be byte-identical,
+  // which is the pattern that preceded both CALL_LIMIT events. The portal
+  // uses the same `_=` cache-buster on its own asset loads.
+  cacheBust: bool('CACHE_BUST', true),
   method: str('METHOD', 'GET').toUpperCase(),
   cookie: required('COOKIE_HEADER'),
   csrfToken: str('CSRF_TOKEN'),
@@ -120,10 +124,19 @@ const config = {
   accept: str('ACCEPT', 'application/json, text/javascript, */*; q=0.01'),
   acceptLanguage: str('ACCEPT_LANGUAGE', 'sk-SK,sk;q=0.9,en;q=0.8'),
   referer: str('REFERER'),
+  // A clean, bookmarkable entry to the booking flow — what goes in the alert,
+  // instead of the giant stateful portlet URL you cannot tap on a phone.
+  bookUrl: str('BOOK_URL', 'https://portal.minv.sk/wps/portal/domov/ecu/ecu_elektronicke_sluzby/ecu-vysys/'),
   origin: str('ORIGIN'),
   extraHeaders: json('EXTRA_HEADERS', {}),
 
   intervalMs: num('INTERVAL_MS', 60_000),
+  // Measured: a session is cut off after roughly six calls to this endpoint, and
+  // neither slower polling, varied payloads, unique URLs nor waiting out
+  // CALL_LIMIT restores it. The calls are the scarce resource, not time — so
+  // spread them across a window instead of spending them in six minutes.
+  callBudget: num('CALL_BUDGET', 6),
+  budgetWindowMin: num('BUDGET_WINDOW_MIN', 0),
   jitterMs: num('JITTER_MS', 15_000),
   // The portal answers slowly when it is struggling: third-party fetches of the
   // same page came back at 8.7s and 19.6s while our 20s ceiling was cutting
@@ -161,7 +174,9 @@ const config = {
   burstAfterHit: Math.max(1, num('POLL_BURST_AFTER_HIT', 4)),
 
   sessionsFile: str('SESSIONS_FILE', 'sessions.json'),
-  callLimitRetireAfter: num('CALL_LIMIT_RETIRE_AFTER', 2),
+  // One is enough: the budget does not recover, so a second CALL_LIMIT on the
+  // same session only spends a poll to learn what the first one already said.
+  callLimitRetireAfter: num('CALL_LIMIT_RETIRE_AFTER', 1),
 };
 
 /**
@@ -263,6 +278,12 @@ function refreshSessionsFromDisk() {
   );
 }
 
+// Stretch a scarce budget over the window you actually care about.
+if (config.budgetWindowMin > 0 && config.callBudget > 0) {
+  const spaced = Math.round((config.budgetWindowMin * 60_000) / config.callBudget);
+  if (spaced > config.intervalMs) config.intervalMs = spaced;
+}
+
 if (!['GET', 'POST', 'PUT'].includes(config.method)) {
   throw new Error(`METHOD must be GET, POST or PUT — got "${config.method}"`);
 }
@@ -319,6 +340,16 @@ let huntOffset = null;
 let sessionCursor = -1;
 
 /** Rotate through the configured bodies, one per poll. */
+/** A unique URL per poll, so no two requests are identical on the wire. */
+function requestUrl(session) {
+  // Each session carries its own captured endpoint; the cache-buster then makes
+  // no two requests identical on the wire.
+  const base = session?.url ?? config.url;
+  if (!config.cacheBust) return base;
+  const separator = base.includes('?') ? '&' : '?';
+  return `${base}${separator}_=${Date.now()}`;
+}
+
 function currentEntry() {
   return config.bodies[(pings - 1) % config.bodies.length];
 }
@@ -426,8 +457,10 @@ async function announceSlot(hit) {
   stopBeeping = await raiseSlotAlarm([
     `service: ${service}`,
     `reason: ${hit.reason}`,
-    hit.sample ? `data  : ${hit.sample}` : 'open the portal tab and click through NOW',
-    `url   : ${config.referer || config.url}`,
+    hit.sample ? `dates : ${hit.sample}` : 'open the portal tab and click through NOW',
+    // A clean, tappable link — never the giant session-bound portlet URL, which
+    // cannot be opened from a phone.
+    `👉 ${config.bookUrl}`,
   ]);
 
   // An alarm nobody came to is noise, not information — one of these beeped for
@@ -487,7 +520,7 @@ async function announceSlot(hit) {
 async function pingOnce(session) {
   session.calls += 1;
   const response = await client.request({
-    url: session.url ?? config.url,
+    url: requestUrl(session),
     method: config.method,
     headers: buildHeaders(session),
     data: config.method === 'GET' ? undefined : (session.body ?? currentEntry().body) || undefined,
@@ -570,9 +603,10 @@ async function pingOnce(session) {
     session.callLimits = (session.callLimits ?? 0) + 1;
     writeStatus({ lastResult: 'call-limit', callLimitHits, lastPingAt: new Date().toISOString(), pings });
 
-    // A session that keeps answering CALL_LIMIT has spent its budget. With
-    // others in the rotation there is no reason to keep asking it — retire it
-    // and give the turn to the next one instead of pausing all of them.
+    // CALL_LIMIT is terminal for the session that hit it: measured, the next
+    // call comes back 401 whether it is sent in sixty seconds or ten minutes,
+    // and the budget never recovers. So retire it and take the next session —
+    // waiting only delays the bad news while a slot could be appearing.
     if (session.callLimits >= config.callLimitRetireAfter && liveSessions(sessions).length > 1) {
       retireSession(session, `CALL_LIMIT x${session.callLimits}`);
       console.warn(
@@ -710,6 +744,9 @@ async function loop() {
     }
   }
   console.log(`  no-slots : ${config.noSlotsPhrases.join(' | ') || '(none configured)'}`);
+  if (config.budgetWindowMin > 0) {
+    console.log(`  budget   : ~${config.callBudget} calls spread over ${config.budgetWindowMin} min`);
+  }
   console.log('  Ctrl+C to stop. Keep the volume up.\n');
 
   writeStatus({
