@@ -1,0 +1,136 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions } from '../src/sessions.js';
+
+const raw = (n) =>
+  Array.from({ length: n }, (_, i) => ({ label: `s${i + 1}`, cookie: `JSESSIONID=${i}`, url: 'https://portal/x' }));
+
+test('a plain array and a {sessions:[...]} wrapper both parse', () => {
+  assert.equal(parseSessions(raw(3)).sessions.length, 3);
+  assert.equal(parseSessions({ sessions: raw(2) }).sessions.length, 2);
+});
+
+test('a session with no cookie is skipped, and says why', () => {
+  const { sessions, skipped } = parseSessions([{ label: 'broken', url: 'https://portal/x' }, ...raw(1)]);
+  assert.equal(sessions.length, 1);
+  assert.match(skipped[0], /missing cookie/);
+});
+
+test('junk entries do not throw', () => {
+  assert.deepEqual(parseSessions(null).sessions, []);
+  assert.deepEqual(parseSessions('nonsense').sessions, []);
+  assert.equal(parseSessions([null, 42]).sessions.length, 0);
+});
+
+/** Walk the rotation n times, threading the cursor as the monitor does. */
+const walk = (s, n) => {
+  const out = [];
+  let cursor = -1;
+  for (let i = 0; i < n; i += 1) {
+    const next = nextSession(s, cursor);
+    if (!next) break;
+    out.push(next.session.label);
+    cursor = next.cursor;
+  }
+  return out;
+};
+
+test('polls go round the sessions in turn', () => {
+  assert.deepEqual(walk(parseSessions(raw(3)).sessions, 6), ['s1', 's2', 's3', 's1', 's2', 's3']);
+});
+
+test('every session gets a turn — none is skipped as the pool shrinks', () => {
+  // The bug this guards: indexing into the live subset polled s1, s3, s5, s7
+  // out of eight and left the even ones to expire untouched.
+  const s = parseSessions(raw(8)).sessions;
+  const seen = new Set();
+  let cursor = -1;
+  for (let i = 0; i < 8; i += 1) {
+    const next = nextSession(s, cursor);
+    seen.add(next.session.label);
+    cursor = next.cursor;
+  }
+  assert.equal(seen.size, 8);
+});
+
+test('a dead session is stepped over, the rest keep their order', () => {
+  const s = parseSessions(raw(3)).sessions;
+  retireSession(s[1], '401');
+  assert.deepEqual(walk(s, 4), ['s1', 's3', 's1', 's3']);
+});
+
+test('a session dying mid-walk does not cost its neighbour a turn', () => {
+  const s = parseSessions(raw(4)).sessions;
+  let cursor = -1;
+  const order = [];
+  for (let i = 0; i < 5; i += 1) {
+    const next = nextSession(s, cursor);
+    order.push(next.session.label);
+    if (next.session.label === 's2') retireSession(next.session, '401');
+    cursor = next.cursor;
+  }
+  assert.deepEqual(order, ['s1', 's2', 's3', 's4', 's1']);
+});
+
+test('when every session is spent there is nothing to poll', () => {
+  const s = parseSessions(raw(2)).sessions;
+  s.forEach((x) => retireSession(x, '401'));
+  assert.equal(nextSession(s, -1), null);
+  assert.deepEqual(liveSessions(s), []);
+});
+
+test('the summary distinguishes spent sessions from live ones', () => {
+  const s = parseSessions(raw(2)).sessions;
+  s[0].calls = 4;
+  retireSession(s[1], 'CALL_LIMIT x3');
+  assert.equal(summarise(s), 's1: 4 calls | s2: dead (CALL_LIMIT x3)');
+});
+
+test('parsing keeps the fields the request needs', () => {
+  const [s] = parseSessions([
+    { label: 'a', cookie: 'c', url: 'u', csrfToken: 't', body: 'data=1', referer: 'r' },
+  ]).sessions;
+  assert.equal(s.csrfToken, 't');
+  assert.equal(s.body, 'data=1');
+  assert.equal(s.referer, 'r');
+  assert.equal(s.calls, 0);
+  assert.equal(s.dead, false);
+});
+
+test('new sessions from disk join a running pool', () => {
+  const current = parseSessions(raw(2)).sessions;
+  const incoming = parseSessions(raw(4)).sessions;
+  const { merged, added } = mergeSessions(current, incoming);
+  assert.equal(merged.length, 4);
+  assert.deepEqual(added.map((s) => s.label), ['s3', 's4']);
+});
+
+test('re-reading the same file adds nothing', () => {
+  const current = parseSessions(raw(3)).sessions;
+  const { merged, added } = mergeSessions(current, parseSessions(raw(3)).sessions);
+  assert.equal(merged.length, 3);
+  assert.deepEqual(added, []);
+});
+
+test('a retired session is not resurrected by a file that still lists it', () => {
+  const current = parseSessions(raw(2)).sessions;
+  retireSession(current[0], '401');
+  const { merged } = mergeSessions(current, parseSessions(raw(2)).sessions);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].dead, true);
+  assert.deepEqual(liveSessions(merged).map((s) => s.label), ['s2']);
+});
+
+test('call counts and state survive a merge', () => {
+  const current = parseSessions(raw(1)).sessions;
+  current[0].calls = 3;
+  const { merged } = mergeSessions(current, parseSessions(raw(2)).sessions);
+  assert.equal(merged[0].calls, 3);
+  assert.equal(merged[1].calls, 0);
+});
+
+test('entries with no cookie are never merged in', () => {
+  const { added } = mergeSessions([], [{ label: 'broken', cookie: '' }]);
+  assert.deepEqual(added, []);
+});
