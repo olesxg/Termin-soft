@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { matchFields, readIdentity, IDENTITY_FIELDS } from '../src/identity.js';
+import { matchFields, readIdentity, waitForIdentityForm, IDENTITY_FIELDS } from '../src/identity.js';
 
 /** The labels exactly as the portal renders them on step 1. */
 const REAL_FORM = [
@@ -77,4 +77,48 @@ test('every field declares an env key and they are unique', () => {
   const envs = IDENTITY_FIELDS.map((f) => f.env);
   assert.equal(new Set(envs).size, envs.length);
   assert.ok(envs.every((e) => /^ID_[A-Z_]+$/.test(e)));
+});
+
+/** A page whose inputs only appear after a few polls, like the real one. */
+const stubPage = (sequence) => {
+  let call = 0;
+  return {
+    evaluate: async () => sequence[Math.min(call++, sequence.length - 1)],
+    waitForTimeout: async () => {},
+  };
+};
+
+test('waits for the form instead of giving up on a still-loading page', async () => {
+  // This is the bug it exists for: pressing Pokračovať starts a navigation and
+  // the fields render after it, so the first look finds nothing.
+  const page = stubPage([[], [], [], REAL_FORM]);
+  const inputs = await waitForIdentityForm(page, { timeoutMs: 5000, pollMs: 0 });
+  assert.equal(inputs.length, REAL_FORM.length);
+});
+
+test('gives up with what it last saw rather than hanging', async () => {
+  const page = stubPage([[]]);
+  const inputs = await waitForIdentityForm(page, { timeoutMs: 0, pollMs: 0 });
+  assert.deepEqual(inputs, []);
+});
+
+test('one stray match is not mistaken for the form arriving', async () => {
+  const halfLoaded = [{ index: 0, label: 'Meno (povinné)', type: 'text' }];
+  const page = stubPage([halfLoaded, halfLoaded, REAL_FORM]);
+  const inputs = await waitForIdentityForm(page, { timeoutMs: 5000, pollMs: 0 });
+  assert.equal(inputs.length, REAL_FORM.length, 'kept waiting past the single match');
+});
+
+test('a page that throws mid-navigation is retried, not fatal', async () => {
+  let call = 0;
+  const page = {
+    evaluate: async () => {
+      call += 1;
+      if (call < 3) throw new Error('Execution context was destroyed');
+      return REAL_FORM;
+    },
+    waitForTimeout: async () => {},
+  };
+  const inputs = await waitForIdentityForm(page, { timeoutMs: 5000, pollMs: 0 });
+  assert.equal(inputs.length, REAL_FORM.length);
 });
