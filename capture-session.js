@@ -20,6 +20,7 @@ import { PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { scoreRequest, countDates } from './src/rank.js';
 import { readEnvValues } from './src/envfile.js';
 import { extractServices, buildRotation, bodyForService, matchServices } from './src/bodies.js';
+import { readIdentity, fillIdentity, enterWizard, IDENTITY_FIELDS } from './src/identity.js';
 
 const config = {
   startUrl: str('START_URL', 'https://pes.minv.sk/'),
@@ -92,6 +93,38 @@ async function warnOnIpMismatch(page) {
   console.log('!'.repeat(66));
 }
 
+/**
+ * Type the identity into step 1 so the human is left with only the CAPTCHA and
+ * the SMS. Never allowed to break the run: if the form has moved or a label
+ * changed, it says so and you fill that field by hand as before.
+ */
+async function prefillIdentity(page) {
+  const identity = readIdentity();
+  if (Object.keys(identity).length === 0) {
+    console.log('\n(no ID_* values in .env — filling the form by hand this time)');
+    console.log(`  set: ${IDENTITY_FIELDS.map((f) => f.env).join(', ')}\n`);
+    return;
+  }
+
+  const overrides = Object.fromEntries(
+    IDENTITY_FIELDS.map((f) => [f.env, str(`${f.env}_SELECTOR`)]).filter(([, v]) => v),
+  );
+
+  try {
+    if (await enterWizard(page)) console.log('  pressed "Pokračovať" to open the form');
+
+    const { filled, missed } = await fillIdentity(page, identity, { overrides });
+    for (const { field, label } of filled) console.log(`  filled ${field.label} <- ${label}`);
+    if (missed.length > 0) {
+      console.log(`  NOT filled: ${missed.map((f) => f.label).join(', ')} — type these by hand.`);
+      console.log(`  (or pin them with ${missed[0].env}_SELECTOR=<css> in .env)`);
+    }
+    if (filled.length > 0) console.log('\n  Form is ready — do the CAPTCHA and the SMS.\n');
+  } catch (err) {
+    console.log(`\n(could not prefill: ${err.message} — fill the form by hand)\n`);
+  }
+}
+
 /** page.url() is "about:blank" for the very first request — useless as a Referer. */
 function usablePageUrl(entry) {
   if (entry.pageUrl && entry.pageUrl !== 'about:blank') return entry.pageUrl;
@@ -118,9 +151,13 @@ function carryOverSettings() {
       'INTERVAL_MS', 'JITTER_MS', 'HEARTBEAT_EVERY',
       'POLL_ALIGN_MINUTE_MOD', 'POLL_ALIGN_MINUTE_OFFSET', 'POLL_ALIGN_SECOND',
       'POLL_BURST', 'POLL_BURST_SPACING_MS',
+      // Losing these would put the six fields back on the human every capture —
+      // the exact chore the prefill exists to remove.
+      ...IDENTITY_FIELDS.map((f) => f.env),
     ],
   );
   return {
+    identity: Object.fromEntries(IDENTITY_FIELDS.map((f) => [f.env, found[f.env] ?? ''])),
     token: found.TELEGRAM_BOT_TOKEN ?? '',
     chatId: found.TELEGRAM_CHAT_ID ?? '',
     onlyService: found.ONLY_SERVICE ?? '',
@@ -381,6 +418,12 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
     carried.networkBackoffCapMs
       ? envLine('NETWORK_BACKOFF_CAP_MS', carried.networkBackoffCapMs)
       : '# NETWORK_BACKOFF_CAP_MS=60000',
+    '',
+    '# Typed into step 1 on the next capture, so only the CAPTCHA and SMS are left.',
+    ...IDENTITY_FIELDS.map((f) =>
+      carried.identity[f.env] ? envLine(f.env, carried.identity[f.env]) : `# ${f.env}=`,
+    ),
+    '',
     carried.onlyService ? envLine('ONLY_SERVICE', carried.onlyService) : '# ONLY_SERVICE=',
     carried.autostart ? envLine('AUTOSTART_MONITOR', carried.autostart) : '# AUTOSTART_MONITOR=true',
     '',
@@ -451,6 +494,8 @@ async function main() {
   console.log('NOTE: the log will contain your name, document number and SMS PIN.');
   console.log(`      ${config.outDir}/ is gitignored — delete it once .env works.\n`);
   await page.goto(config.startUrl, { waitUntil: 'domcontentloaded' });
+
+  if (bool('PREFILL_IDENTITY', true)) await prefillIdentity(page);
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   await rl.question(
