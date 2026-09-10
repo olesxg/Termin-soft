@@ -14,7 +14,8 @@
     "health": "node scripts/health.js",
     "wire": "node scripts/wire.js",
     "preflight": "node scripts/preflight.js",
-    "hunt": "node scripts/hunt.js"
+    "hunt": "node scripts/hunt.js",
+    "capture:hold": "node capture-session.js --hold"
   },
   "dependencies": {
     "axios": "^1.7.7",
