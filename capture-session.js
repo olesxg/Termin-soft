@@ -147,7 +147,7 @@ function carryOverSettings() {
     ['.env', '.env.captured'],
     [
       'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'ONLY_SERVICE', 'AUTOSTART_MONITOR',
-      'START_URL', 'NETWORK_BACKOFF_CAP_MS',
+      'START_URL', 'NETWORK_BACKOFF_CAP_MS', 'POOL_TARGET',
       'INTERVAL_MS', 'JITTER_MS', 'HEARTBEAT_EVERY',
       'POLL_ALIGN_MINUTE_MOD', 'POLL_ALIGN_MINUTE_OFFSET', 'POLL_ALIGN_SECOND',
       'POLL_BURST', 'POLL_BURST_SPACING_MS',
@@ -162,6 +162,7 @@ function carryOverSettings() {
     chatId: found.TELEGRAM_CHAT_ID ?? '',
     onlyService: found.ONLY_SERVICE ?? '',
     autostart: found.AUTOSTART_MONITOR ?? '',
+    poolTarget: found.POOL_TARGET ?? '',
     // A pace you tuned by hand must not be reset to the default on every
     // re-capture — re-capturing is the routine case, not the exception.
     // The wizard's deep link. Losing it on every re-capture meant digging the
@@ -426,6 +427,7 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
     '',
     carried.onlyService ? envLine('ONLY_SERVICE', carried.onlyService) : '# ONLY_SERVICE=',
     carried.autostart ? envLine('AUTOSTART_MONITOR', carried.autostart) : '# AUTOSTART_MONITOR=true',
+    carried.poolTarget ? envLine('POOL_TARGET', carried.poolTarget) : '# POOL_TARGET=3',
     '',
   ];
 
@@ -435,6 +437,7 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
 }
 
 async function main() {
+  let poolSize = 0;
   await fs.mkdir(config.outDir, { recursive: true });
   const logPath = path.join(config.outDir, 'requests.jsonl');
   const log = await fs.open(logPath, 'w');
@@ -574,7 +577,7 @@ async function main() {
       } catch {
         // no ONLY_SERVICE narrowing — the captured body is the right one
       }
-      await appendSession(ranked[0].entry, cookieHeader, userAgent, sessionBody);
+      poolSize = await appendSession(ranked[0].entry, cookieHeader, userAgent, sessionBody);
     }
   }
 
@@ -598,6 +601,21 @@ async function main() {
   // The intended shape of a pooled evening: capture as many as you want with
   // AUTOSTART_MONITOR=false, then finish with `npm run capture -- --hold`.
   const hold = process.argv.includes('--hold');
+
+  // Building a pool takes several captures, but autostarting after the first
+  // one blocks the terminal — so the pool could never actually be built. Wait
+  // until POOL_TARGET live sessions exist, then let the last capture hold its
+  // browser and start the monitor. --hold still forces it for this one run.
+  const poolTarget = num('POOL_TARGET', 1);
+  if (!hold && poolTarget > 1 && poolSize > 0 && poolSize < poolTarget) {
+    await browser.close();
+    console.log(`
+Pool: ${poolSize} of ${poolTarget}. Browser closed, terminal is free.`);
+    console.log(`Run \`npm run capture\` again — ${poolTarget - poolSize} more to go.`);
+    console.log('The last one keeps its browser open and starts the monitor itself.');
+    return;
+  }
+
   if (envTarget && (hold || bool('AUTOSTART_MONITOR', true))) {
     await startMonitor(envTarget, page);
     return;

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions } from '../src/sessions.js';
+import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions } from '../src/sessions.js';
 
 const raw = (n) =>
   Array.from({ length: n }, (_, i) => ({ label: `s${i + 1}`, cookie: `JSESSIONID=${i}`, url: 'https://portal/x' }));
@@ -133,4 +133,39 @@ test('call counts and state survive a merge', () => {
 test('entries with no cookie are never merged in', () => {
   const { added } = mergeSessions([], [{ label: 'broken', cookie: '' }]);
   assert.deepEqual(added, []);
+});
+
+const minutesAgo = (m) => new Date(Date.now() - m * 60_000).toISOString();
+
+test('sessions older than the idle cutoff are dropped', () => {
+  const kept = freshSessions(
+    [
+      { label: 'fresh', capturedAt: minutesAgo(5) },
+      { label: 'old', capturedAt: minutesAgo(200) },
+      { label: 'borderline', capturedAt: minutesAgo(89) },
+    ],
+    90,
+  );
+  assert.deepEqual(kept.map((s) => s.label), ['fresh', 'borderline']);
+});
+
+test('an unknown capture time is kept — not knowing is not proof of death', () => {
+  const kept = freshSessions([{ label: 'no date' }, { label: 'junk', capturedAt: 'nonsense' }], 90);
+  assert.equal(kept.length, 2);
+});
+
+test('the refresh path uses the same cutoff, so corpses cannot come back', () => {
+  // The bug: startup dropped two 3-hour-old sessions and the very next refresh
+  // merged them straight back in, each then costing a poll to rediscover.
+  const onDisk = [
+    { label: 's1', url: 'https://portal.minv.sk/a', cookie: 'a=1', method: 'POST', capturedAt: minutesAgo(200) },
+    { label: 's2', url: 'https://portal.minv.sk/b', cookie: 'b=2', method: 'POST', capturedAt: minutesAgo(2) },
+  ];
+  const { sessions } = parseSessions(onDisk);
+  const { merged } = mergeSessions([], freshSessions(sessions, 90));
+  assert.deepEqual(merged.map((s) => s.label), ['s2']);
+});
+
+test('nothing survives when every session is stale', () => {
+  assert.deepEqual(freshSessions([{ capturedAt: minutesAgo(500) }], 90), []);
 });

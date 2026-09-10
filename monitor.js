@@ -22,7 +22,7 @@ import { detectSlots, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { parseBodiesFile, interleavePrimary } from './src/bodies.js';
 import { readPortalStatus, backoffDelay } from './src/portal.js';
 import { alignedDelayMs, minuteOffsetOf } from './src/schedule.js';
-import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions } from './src/sessions.js';
+import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions } from './src/sessions.js';
 import { writeStatus, readStatus } from './src/status.js';
 import { mirrorConsoleTo } from './src/logfile.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
@@ -207,11 +207,7 @@ function loadSessions() {
     // Drop what cannot still be alive BEFORE spending a poll to find out.
     // Pruning only on exit is too late: a pool left over from earlier in the
     // day cost 40 minutes of watching while each corpse was tried in turn.
-    const cutoff = Date.now() - IDLE_DEATH_MIN * 60_000;
-    const fresh = fromFile.filter((s) => {
-      const at = Date.parse(s.capturedAt ?? '');
-      return Number.isNaN(at) || at > cutoff;
-    });
+    const fresh = freshSessions(fromFile, IDLE_DEATH_MIN);
     const stale = fromFile.length - fresh.length;
     if (stale > 0) {
       console.warn(
@@ -268,7 +264,9 @@ function refreshSessionsFromDisk() {
   }
 
   const { sessions: fromFile } = parseSessions(parsed);
-  const { merged, added } = mergeSessions(sessions, fromFile);
+  // Same cutoff as at startup. Without it the refresh re-adopts the corpses the
+  // startup filter has just dropped, and each one still costs a poll to bury.
+  const { merged, added } = mergeSessions(sessions, freshSessions(fromFile, IDLE_DEATH_MIN));
   if (added.length === 0) return;
 
   sessions = merged;

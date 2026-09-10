@@ -120,3 +120,22 @@ export function mergeSessions(current, incoming) {
   const added = incoming.filter((s) => s.cookie && !known.has(s.cookie));
   return { merged: [...current, ...added], added };
 }
+
+/**
+ * Drop sessions too old to still be authenticated.
+ *
+ * Applied when loading AND when topping up from disk. It used to run only at
+ * startup, so the refresh path pulled the very sessions that had just been
+ * dropped straight back in — the log read "dropped 2 ... too old" and then
+ * "picked up 2 new session(s)" one line later, and each corpse still took its
+ * turn in the rotation and spent a poll to discover it was dead.
+ *
+ * An entry with no capturedAt is kept: unknown age is not evidence of death.
+ */
+export function freshSessions(list, maxAgeMin) {
+  const cutoff = Date.now() - maxAgeMin * 60_000;
+  return list.filter((entry) => {
+    const at = Date.parse(entry?.capturedAt ?? '');
+    return Number.isNaN(at) || at > cutoff;
+  });
+}
