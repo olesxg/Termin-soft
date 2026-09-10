@@ -1,3 +1,4 @@
+import { isThirdPartyHost } from './hosts.js';
 /**
  * Several captured sessions, polled in rotation.
  *
@@ -37,6 +38,12 @@ export function parseSessions(raw) {
     const missing = REQUIRED.filter((key) => !entry[key]);
     if (missing.length > 0) {
       skipped.push(`#${i + 1} (${entry.label ?? 'unlabelled'}): missing ${missing.join(', ')}`);
+      return;
+    }
+    // A pooled session that points somewhere else is worse than no session: it
+    // still takes its turn in the rotation and spends a poll answering nothing.
+    if (isThirdPartyHost(entry.url)) {
+      skipped.push(`#${i + 1} (${entry.label ?? 'unlabelled'}): points at ${new URL(entry.url).hostname}, not the portal`);
       return;
     }
     sessions.push({

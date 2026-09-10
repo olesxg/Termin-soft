@@ -1,4 +1,5 @@
 import { normalize } from './detect.js';
+import { isThirdPartyHost } from './hosts.js';
 
 /** Words that suggest "this is the request that lists appointments". */
 const INTERESTING = ['termin', 'termín', 'date', 'datum', 'dátum', 'slot', 'availab', 'volny', 'voľn', 'cas', 'čas'];
@@ -38,6 +39,11 @@ export function countDates(body) {
  * mistake this scoring exists to avoid.
  */
 export function scoreRequest(entry, noSlotsPhrases = []) {
+  // Google, analytics and the IP-lookup the wizard itself calls are recorded
+  // like everything else. None can ever be the endpoint, and one of them has
+  // already won this ranking and poisoned the session pool.
+  if (isThirdPartyHost(entry.url)) return -1000;
+
   let score = 0;
   const url = normalize(entry.url ?? '');
   const body = normalize(entry.responseBody ?? '');
