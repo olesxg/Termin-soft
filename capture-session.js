@@ -599,7 +599,7 @@ async function main() {
   // AUTOSTART_MONITOR=false, then finish with `npm run capture -- --hold`.
   const hold = process.argv.includes('--hold');
   if (envTarget && (hold || bool('AUTOSTART_MONITOR', true))) {
-    await startMonitor(envTarget);
+    await startMonitor(envTarget, page);
     return;
   }
 
@@ -633,8 +633,12 @@ async function main() {
  * already looking at. monitor.js reads its config from process.env at import
  * time, so .env has to be copied and reloaded BEFORE the import.
  */
-async function startMonitor(envTarget) {
+async function startMonitor(envTarget, page) {
   try {
+    // Taken as a parameter, not reached for: it is main()'s local, and closing
+    // over it silently threw ReferenceError here — which cost a live session,
+    // because the handover then fell through to "start it by hand".
+    if (!page) throw new Error('no page handed over — cannot pre-fill the booking');
     await fs.copyFile(envTarget, '.env');
     const dotenv = await import('dotenv');
     dotenv.config({ path: '.env', override: true });
