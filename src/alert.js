@@ -20,10 +20,11 @@ export function startBeeping() {
   return () => clearInterval(timer);
 }
 
+/** @returns {Promise<boolean>} whether Telegram actually accepted the message. */
 export async function notifyTelegram(text) {
   const token = str('TELEGRAM_BOT_TOKEN');
   const chatId = str('TELEGRAM_CHAT_ID');
-  if (!token || !chatId) return;
+  if (!token || !chatId) return false;
 
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -34,9 +35,12 @@ export async function notifyTelegram(text) {
     });
     if (!res.ok) {
       console.error(`  Telegram push failed: HTTP ${res.status}`);
+      return false;
     }
+    return true;
   } catch (err) {
     console.error(`  Telegram push failed: ${err.message}`);
+    return false;
   }
 }
 
