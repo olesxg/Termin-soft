@@ -545,7 +545,15 @@ async function main() {
   // killing the window throws away the CAPTCHA and SMS you just went through.
   console.log('\nLeaving the browser open so the session stays alive.');
 
-  if (envTarget && bool('AUTOSTART_MONITOR', true)) {
+  // --hold overrides AUTOSTART_MONITOR for this one run: keep THIS browser and
+  // start the monitor in it. The window is already sitting on the date step, so
+  // a found slot can be pre-filled there — a browser opened later from cookies
+  // alone lands wherever the portal decides, which is not the date step.
+  //
+  // The intended shape of a pooled evening: capture as many as you want with
+  // AUTOSTART_MONITOR=false, then finish with `npm run capture -- --hold`.
+  const hold = process.argv.includes('--hold');
+  if (envTarget && (hold || bool('AUTOSTART_MONITOR', true))) {
     await startMonitor(envTarget);
     return;
   }
