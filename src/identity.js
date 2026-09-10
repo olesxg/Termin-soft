@@ -141,7 +141,11 @@ function CSS_ESCAPE(value) {
  * runs once, at the start, and only while no identity field exists yet.
  */
 export async function enterWizard(page, { timeoutMs = 15_000 } = {}) {
-  const inputs = await collectInputs(page).catch(() => []);
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+
+  // Let the page render before deciding what we are looking at: judging a
+  // half-loaded step 1 as "no form" would click a button that is not there.
+  const inputs = await waitForIdentityForm(page, { timeoutMs: 4000, pollMs: 300 });
   if (matchFields(inputs).some((p) => p.input)) return false; // already on the form
 
   const button = page
@@ -158,6 +162,34 @@ export async function enterWizard(page, { timeoutMs = 15_000 } = {}) {
 }
 
 /**
+ * Wait until the form is actually on screen.
+ *
+ * Pressing "Pokračovať" starts a navigation and the step-1 fields are rendered
+ * after it, so filling immediately finds an empty page and reports every field
+ * as missing. A fixed sleep only moves the race; this waits for the condition
+ * that matters — the fields existing — and gives up with whatever it last saw.
+ *
+ * `need` is 2 rather than 1 so a single stray match on a still-loading page
+ * cannot be mistaken for the form having arrived.
+ */
+export async function waitForIdentityForm(page, { timeoutMs = 30_000, pollMs = 400, need = 2 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = [];
+
+  for (;;) {
+    try {
+      latest = await collectInputs(page);
+      const found = matchFields(latest).filter((pair) => pair.input).length;
+      if (found >= need) return latest;
+    } catch {
+      // Execution context destroyed mid-navigation — expected, try again.
+    }
+    if (Date.now() >= deadline) return latest;
+    await page.waitForTimeout(pollMs);
+  }
+}
+
+/**
  * Type the identity into the form.
  *
  * Typed key by key, not assigned: the portal validates as you type and a value
@@ -165,11 +197,11 @@ export async function enterWizard(page, { timeoutMs = 15_000 } = {}) {
  * look filled while the wizard still considers it empty.
  */
 export async function fillIdentity(page, identity, options = {}) {
-  const { delayMs = 25, overrides = {} } = options;
+  const { delayMs = 25, overrides = {}, waitMs = 30_000 } = options;
   const filled = [];
   const missed = [];
 
-  const inputs = await collectInputs(page);
+  const inputs = await waitForIdentityForm(page, { timeoutMs: waitMs });
   const pairs = matchFields(inputs);
 
   for (const { field, input } of pairs) {
