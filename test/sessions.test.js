@@ -189,3 +189,27 @@ test('only a session with no body falls back to the rotation', () => {
   assert.equal(serviceLabelOf({}, 'Biosnímanie'), 'Biosnímanie');
   assert.equal(serviceLabelOf(null, 'Biosnímanie'), 'Biosnímanie');
 });
+
+test('a session spent by CALL_LIMIT leaves the rotation at once', () => {
+  const { sessions } = parseSessions([
+    { label: 'sA', url: 'https://portal.minv.sk/a', cookie: 'a=1', method: 'POST' },
+    { label: 'sB', url: 'https://portal.minv.sk/b', cookie: 'b=2', method: 'POST' },
+  ]);
+  retireSession(sessions[0], 'CALL_LIMIT x1');
+
+  assert.deepEqual(liveSessions(sessions).map((s) => s.label), ['sB']);
+  assert.equal(nextSession(sessions, -1).session.label, 'sB', 'the next poll goes to the survivor');
+});
+
+test('retiring the last session empties the pool instead of leaving it waiting', () => {
+  // CALL_LIMIT never lifts, so a lone spent session must not be sat out for ten
+  // minutes: an empty pool has to be reported while there is still time to
+  // capture another.
+  const { sessions } = parseSessions([
+    { label: 'only', url: 'https://portal.minv.sk/a', cookie: 'a=1', method: 'POST' },
+  ]);
+  retireSession(sessions[0], 'CALL_LIMIT x1');
+
+  assert.equal(liveSessions(sessions).length, 0);
+  assert.equal(nextSession(sessions, -1), null, 'nothing left to poll — the spent path must fire');
+});

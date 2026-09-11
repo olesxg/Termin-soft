@@ -634,17 +634,25 @@ async function pingOnce(session) {
     // call comes back 401 whether it is sent in sixty seconds or ten minutes,
     // and the budget never recovers. So retire it and take the next session —
     // waiting only delays the bad news while a slot could be appearing.
-    if (session.callLimits >= config.callLimitRetireAfter && liveSessions(sessions).length > 1) {
+    // Retire it even when it was the last one. The budget never comes back, so
+    // sitting out ten minutes on a session that is already dead only delays the
+    // bad news — and an empty pool is something to be told NOW, while there is
+    // still time to capture another, not after a silent wait ending in 401.
+    if (session.callLimits >= config.callLimitRetireAfter) {
       retireSession(session, `CALL_LIMIT x${session.callLimits}`);
+      const left = liveSessions(sessions).length;
       console.warn(
-        `\n[${ts()}] CALL_LIMIT — ${session.label} is spent, dropping it. Still live: ${liveSessions(sessions).length}`,
+        `\n[${ts()}] CALL_LIMIT — ${session.label} is spent, dropping it. Still live: ${left}` +
+          (left === 0 ? ' — pool is empty, run: npm run capture' : ''),
       );
       extraWaitMs = 0;
       networkFailures = 0;
       return TRY_NEXT_SESSION;
     }
 
-    // Waiting only makes sense when there is nothing else to ask.
+    // Only reachable when CALL_LIMIT_RETIRE_AFTER was raised above 1, giving
+    // this session another chance. Waiting still only makes sense when there is
+    // nothing else to ask.
     extraWaitMs =
       liveSessions(sessions).length > 1
         ? 0
