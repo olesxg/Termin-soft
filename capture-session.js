@@ -150,7 +150,7 @@ function carryOverSettings() {
       'START_URL', 'NETWORK_BACKOFF_CAP_MS', 'POOL_TARGET',
       'INTERVAL_MS', 'JITTER_MS', 'HEARTBEAT_EVERY',
       'POLL_ALIGN_MINUTE_MOD', 'POLL_ALIGN_MINUTE_OFFSET', 'POLL_ALIGN_SECOND',
-      'POLL_BURST', 'POLL_BURST_SPACING_MS',
+      'POLL_BURST', 'POLL_BURST_SPACING_MS', 'POLL_BURST_AFTER_HIT',
       // Losing these would put the six fields back on the human every capture —
       // the exact chore the prefill exists to remove.
       ...IDENTITY_FIELDS.map((f) => f.env),
@@ -175,6 +175,7 @@ function carryOverSettings() {
     align: {
       mod: found.POLL_ALIGN_MINUTE_MOD ?? '', offset: found.POLL_ALIGN_MINUTE_OFFSET ?? '',
       second: found.POLL_ALIGN_SECOND ?? '', burst: found.POLL_BURST ?? '', spacing: found.POLL_BURST_SPACING_MS ?? '',
+      afterHit: found.POLL_BURST_AFTER_HIT ?? '',
     },
   };
 }
@@ -419,6 +420,7 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
     carried.align.second ? envLine('POLL_ALIGN_SECOND', carried.align.second) : '# POLL_ALIGN_SECOND=58',
     carried.align.burst ? envLine('POLL_BURST', carried.align.burst) : '# POLL_BURST=1',
     carried.align.spacing ? envLine('POLL_BURST_SPACING_MS', carried.align.spacing) : '# POLL_BURST_SPACING_MS=1500',
+    carried.align.afterHit ? envLine('POLL_BURST_AFTER_HIT', carried.align.afterHit) : '# POLL_BURST_AFTER_HIT=4',
     envLine('NO_SLOTS_TEXT', config.noSlotsPhrases.join(',')),
     isEcuDateEndpoint ? envLine('SLOT_JSON_PATH', 'services') : '# SLOT_JSON_PATH=data.terms',
     '',
