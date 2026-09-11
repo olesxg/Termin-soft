@@ -273,6 +273,14 @@ async function appendSession(best, cookieHeader, userAgent, body) {
     /csrf|xsrf|verification.?token/i.test(name),
   );
 
+  // Record WHICH service this session asks about. serviceBranchIDs are
+  // regenerated every capture, so an id alone means nothing later — and without
+  // the name the monitor had to guess, printing whatever the rotation happened
+  // to be on rather than what it actually polled.
+  const serviceId = (decodeURIComponent(body ?? '').match(/"serviceBranchID"\s*:\s*"([^"]+)"/) ?? [])[1] ?? null;
+  const known = captured.flatMap((e) => extractServices(e.responseBody));
+  const match = serviceId ? known.find((s) => s.id === serviceId) : null;
+
   existing.push({
     // Local time, to match monitor.log — a UTC label next to local timestamps
     // reads as a two-hour gap that never happened.
@@ -285,6 +293,9 @@ async function appendSession(best, cookieHeader, userAgent, body) {
     referer: headers.referer ?? usablePageUrl(best),
     userAgent,
     body,
+    service: serviceId
+      ? { id: serviceId, label: match ? `${match.group ? `${match.group} / ` : ''}${match.name}` : null }
+      : null,
   });
 
   await fs.writeFile(file, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
