@@ -18,11 +18,11 @@ import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 import { str, num, bool, list, json, required, nextDelay, ts } from './src/config.js';
-import { detectSlots, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
+import { detectSlots, normalize, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { parseBodiesFile, interleavePrimary } from './src/bodies.js';
 import { readPortalStatus, backoffDelay } from './src/portal.js';
 import { alignedDelayMs, minuteOffsetOf } from './src/schedule.js';
-import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions } from './src/sessions.js';
+import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions, serviceLabelOf } from './src/sessions.js';
 import { writeStatus, readStatus } from './src/status.js';
 import { mirrorConsoleTo } from './src/logfile.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
@@ -215,7 +215,32 @@ function loadSessions() {
       );
     }
 
-    if (fresh.length > 0) { usingSessionsFile = true; return fresh; }
+    // Enforced here, not only at capture time. The body lives on the session, so
+    // a pool built before ONLY_SERVICE was set — or topped up from an older
+    // file — keeps asking about services you never wanted, and every one of
+    // those spends a call from a budget of roughly five per session.
+    const only = str('ONLY_SERVICE');
+    let usable = fresh;
+    if (only) {
+      const want = normalize(only);
+      const named = fresh.filter((s) => s.service?.label);
+      const unnamed = fresh.length - named.length;
+      usable = fresh.filter((s) => !s.service?.label || normalize(s.service.label).includes(want));
+
+      const dropped = fresh.length - usable.length;
+      if (dropped > 0) {
+        console.warn(`  dropped ${dropped} session(s) asking about something other than "${only}"`);
+      }
+      // Sessions captured before the service was recorded cannot be checked.
+      // Dropping them would throw away working sessions, so keep them and say so.
+      if (unnamed > 0) {
+        console.warn(
+          `  ${unnamed} session(s) have no recorded service — kept, but re-capture to be sure they ask about "${only}"`,
+        );
+      }
+    }
+
+    if (usable.length > 0) { usingSessionsFile = true; return usable; }
     console.warn(`${config.sessionsFile} holds no usable session — falling back to .env`);
   }
 
@@ -430,8 +455,12 @@ async function bookingPage(session) {
   }
 }
 
-async function announceSlot(hit) {
-  const service = currentEntry().label ?? currentEntry().id ?? '(unnamed)';
+async function announceSlot(hit, session = null) {
+  // Name the service that was actually asked about. The session's own body is
+  // what gets sent, so the rotation's label describes nothing — and announcing
+  // the wrong one already sent someone to book a slot that, for the service
+  // they need, did not exist.
+  const service = serviceLabelOf(session, currentEntry().label ?? currentEntry().id) ?? '(unnamed)';
   const fingerprint = `${service}|${hit.sample ?? hit.reason}`;
 
   writeStatus({
@@ -692,7 +721,7 @@ async function pingOnce(session) {
     // actually rotating?" is the question the log has to be able to answer.
     const via = sessions.length > 1 ? ` via ${session.label}` : '';
     console.log(
-      `[${ts()}] ping #${pings}${via} [${currentEntry().label ?? '?'}] — no slots (${result.reason})`,
+      `[${ts()}] ping #${pings}${via} [${serviceLabelOf(session, currentEntry().label) ?? '?'}] — no slots (${result.reason})`,
     );
   } else {
     process.stdout.write('.');
@@ -778,6 +807,10 @@ async function loop() {
       refreshSessionsFromDisk();
 
       let hit = null;
+      // Which session actually answered. `turn` dies with the loop, and the
+      // alert needs it: it is the session's body that decides which service the
+      // answer is about.
+      let answeredBy = null;
       for (let attempt = 0; attempt < sessions.length && running; attempt += 1) {
         const turn = nextSession(sessions, sessionCursor);
         if (!turn) {
@@ -790,6 +823,7 @@ async function loop() {
         const outcome = await pingOnce(turn.session);
         if (outcome !== TRY_NEXT_SESSION) {
           hit = outcome ?? null;
+          answeredBy = turn.session;
           break;
         }
         if (attempt === 0 && liveSessions(sessions).length > 0) {
@@ -797,7 +831,7 @@ async function loop() {
         }
       }
 
-      if (hit) await announceSlot(hit);
+      if (hit) await announceSlot(hit, answeredBy);
     } catch (err) {
       // A connection that never reached the server costs no call budget, so
       // giving up would only lose slots — the session is still intact. Back off

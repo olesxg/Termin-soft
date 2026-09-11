@@ -139,3 +139,22 @@ export function freshSessions(list, maxAgeMin) {
     return Number.isNaN(at) || at > cutoff;
   });
 }
+
+/**
+ * What a poll on this session actually asks about.
+ *
+ * The session's own body wins over the rotation file, so the rotation's label
+ * describes nothing when a session carries a body — and the log printed it
+ * anyway, naming Biosnímanie while the request asked about Registrácia. The
+ * alert did the same, which is how a slot was once announced under a service it
+ * did not belong to.
+ */
+export function serviceLabelOf(session, fallback = null) {
+  if (session?.service?.label) return session.service.label;
+  if (session?.service?.id) return session.service.id;
+  if (session?.body) {
+    const id = (decodeURIComponent(session.body).match(/"serviceBranchID"\s*:\s*"([^"]+)"/) ?? [])[1];
+    if (id) return id; // no name recorded — the id is still honest
+  }
+  return fallback; // no body: the rotation really is what gets sent
+}

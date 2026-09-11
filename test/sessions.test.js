@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions } from '../src/sessions.js';
+import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions, serviceLabelOf } from '../src/sessions.js';
 
 const raw = (n) =>
   Array.from({ length: n }, (_, i) => ({ label: `s${i + 1}`, cookie: `JSESSIONID=${i}`, url: 'https://portal/x' }));
@@ -168,4 +168,24 @@ test('the refresh path uses the same cutoff, so corpses cannot come back', () =>
 
 test('nothing survives when every session is stale', () => {
   assert.deepEqual(freshSessions([{ capturedAt: minutesAgo(500) }], 90), []);
+});
+
+test('the service reported is the one the session actually asks about', () => {
+  // The bug: the session's own body is what gets sent, but the log printed the
+  // rotation's current label — naming Biosnímanie while asking about Registrácia.
+  const session = {
+    body: 'data=%7B%22serviceBranchID%22%3A%2269d5d361%22%7D',
+    service: { id: '69d5d361', label: 'Dočasné útočisko / Registrácia dočasného útočiska' },
+  };
+  assert.match(serviceLabelOf(session, 'Biosnímanie'), /Registrácia/);
+});
+
+test('with no recorded name the id is reported, never the rotation', () => {
+  const session = { body: 'data=%7B%22serviceBranchID%22%3A%22abc123%22%7D' };
+  assert.equal(serviceLabelOf(session, 'Biosnímanie'), 'abc123');
+});
+
+test('only a session with no body falls back to the rotation', () => {
+  assert.equal(serviceLabelOf({}, 'Biosnímanie'), 'Biosnímanie');
+  assert.equal(serviceLabelOf(null, 'Biosnímanie'), 'Biosnímanie');
 });
