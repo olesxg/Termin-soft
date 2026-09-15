@@ -53,7 +53,10 @@ const fakePage = (failAt = null) => {
     bringToFront: async () => guard('focus'),
     check: async () => guard('office'),
     selectOption: async () => guard('date'),
-    waitForSelector: async () => guard('waitTime'),
+    // Two steps wait now: the office radio only exists after the human has
+    // done the CAPTCHA and SMS, so it is waited for like the time list is.
+    waitForSelector: async (sel) =>
+      guard(String(sel).includes('vyberPracoviska') ? 'waitOffice' : 'waitTime'),
     locator: () => ({ first: () => ({ check: async () => guard('time') }) }),
     screenshot: async () => guard('screenshot'),
   };
@@ -63,7 +66,7 @@ test('it selects office, date and time — and never presses Continue', async ()
   const page = fakePage();
   const result = await prepareBooking(page, firstOffer(REAL_SAMPLE));
   assert.deepEqual(result, { ok: true, step: 'ready' });
-  assert.deepEqual(page.calls, ['focus', 'office', 'date', 'waitTime', 'time']);
+  assert.deepEqual(page.calls, ['focus', 'waitOffice', 'office', 'date', 'waitTime', 'time']);
 });
 
 test('a failure is reported, not thrown — the alarm must still fire', async () => {
@@ -76,7 +79,8 @@ test('a failure is reported, not thrown — the alarm must still fire', async ()
 test('it stops at the first failing step and does not carry on', async () => {
   const page = fakePage('office');
   await prepareBooking(page, firstOffer(REAL_SAMPLE));
-  assert.deepEqual(page.calls, ['focus', 'office']);
+  // The wait comes before the check now, and nothing after office runs.
+  assert.deepEqual(page.calls, ['focus', 'waitOffice', 'office']);
 });
 
 test('the Cookie header splits into name/value pairs', () => {
@@ -97,4 +101,40 @@ test('junk segments are dropped rather than producing empty cookies', () => {
   assert.deepEqual(parseCookieHeader(''), []);
   assert.deepEqual(parseCookieHeader(null), []);
   assert.deepEqual(parseCookieHeader('=novalue'), []);
+});
+
+test('the office wait is long enough to cover a CAPTCHA and an SMS', async () => {
+  // The window opens at step one, so the radio appears only after the human has
+  // authenticated. A five-second wait — the old behaviour — meant the pre-fill
+  // never had a chance and everything was left to be retyped under time pressure.
+  const seen = [];
+  const page = {
+    bringToFront: async () => {},
+    waitForSelector: async (sel, opts) => {
+      seen.push({ sel, timeout: opts?.timeout });
+      throw new Error('not there yet');
+    },
+    check: async () => {},
+    selectOption: async () => {},
+    locator: () => ({ first: () => ({ check: async () => {} }) }),
+  };
+
+  await prepareBooking(page, firstOffer(REAL_SAMPLE));
+  assert.equal(seen.length, 1);
+  assert.match(seen[0].sel, /vyberPracoviska/);
+  assert.ok(seen[0].timeout >= 60_000, `waited only ${seen[0].timeout}ms — too short for a CAPTCHA`);
+});
+
+test('the office wait timeout is configurable', async () => {
+  let got = null;
+  const page = {
+    bringToFront: async () => {},
+    waitForSelector: async (sel, opts) => { got = opts?.timeout; throw new Error('stop'); },
+    check: async () => {},
+    selectOption: async () => {},
+    locator: () => ({ first: () => ({ check: async () => {} }) }),
+  };
+
+  await prepareBooking(page, firstOffer(REAL_SAMPLE), { officeTimeoutMs: 1234 });
+  assert.equal(got, 1234);
 });

@@ -56,7 +56,7 @@ export function firstOffer(sample) {
  *   watch. The banner and the Telegram push are what the user acts on; this is
  *   a shortcut on top of them, not a replacement.
  */
-export async function prepareBooking(page, offer, { screenshotPath } = {}) {
+export async function prepareBooking(page, offer, { screenshotPath, officeTimeoutMs = 10 * 60_000 } = {}) {
   const step = async (name, fn) => {
     try {
       await fn();
@@ -69,9 +69,15 @@ export async function prepareBooking(page, offer, { screenshotPath } = {}) {
   const bringToFront = await step('focus', () => page.bringToFront());
   if (bringToFront) return bringToFront;
 
-  const office = await step('office', () =>
-    page.check(SELECTORS.office(offer.branchPublicId), { timeout: 5_000 }),
-  );
+  // A browser opened on a session's cookies lands wherever the portal decides,
+  // and that is usually step one — so the office radio does not exist yet. It
+  // appears only once the human has done the CAPTCHA and the SMS. Failing after
+  // five seconds meant the pre-fill never had a chance and everything was left
+  // to be retyped by hand; waiting is the whole point.
+  const office = await step('office', async () => {
+    await page.waitForSelector(SELECTORS.office(offer.branchPublicId), { timeout: officeTimeoutMs });
+    await page.check(SELECTORS.office(offer.branchPublicId), { timeout: 5_000 });
+  });
   if (office) return office;
 
   const date = await step('date', () =>

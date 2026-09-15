@@ -27,6 +27,7 @@ import { writeStatus, readStatus } from './src/status.js';
 import { mirrorConsoleTo } from './src/logfile.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 import { firstOffer, prepareBooking, openSessionBrowser } from './src/booking.js';
+import { readIdentity, fillIdentity, enterWizard } from './src/identity.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -437,6 +438,34 @@ let ownBrowser = null;
  * this a slot found in pool mode had nowhere to be booked, which is exactly
  * how 30.09.2026 was lost on 2026-09-08.
  */
+/**
+ * Type the identity into a freshly opened booking window.
+ *
+ * The window lands at step one, so without this the six fields have to be
+ * retyped by hand at the exact moment speed decides whether the slot is still
+ * there. The CAPTCHA and the SMS stay the human's — those are the portal's
+ * anti-automation controls and are not ours to defeat — but nothing else here
+ * needs a person.
+ */
+async function prefillBookingIdentity(page) {
+  const identity = readIdentity();
+  if (Object.keys(identity).length === 0) return;
+
+  try {
+    if (await enterWizard(page)) console.log(`[${ts()}] booking window: opened the form`);
+    const { filled, missed } = await fillIdentity(page, identity);
+    if (filled.length > 0) {
+      console.log(`[${ts()}] booking window: ${filled.length} field(s) filled — do the CAPTCHA and the SMS`);
+    }
+    if (missed.length > 0) {
+      console.log(`[${ts()}] booking window: type by hand — ${missed.map((f) => f.label).join(', ')}`);
+    }
+  } catch (err) {
+    // Never let this stop the alarm: the banner and the push already went out.
+    console.warn(`[${ts()}] booking window: could not prefill (${err.message})`);
+  }
+}
+
 async function bookingPage(session) {
   if (globalThis.__terminPage) return globalThis.__terminPage;
   if (!bool('PREFILL_BOOKING', true) || !bool('OPEN_BROWSER_ON_SLOT', true)) return null;
@@ -448,6 +477,10 @@ async function bookingPage(session) {
     ownBrowser = await openSessionBrowser(chromium, session, str('START_URL', 'https://pes.minv.sk/'), {
       executablePath: str('CHROMIUM_EXECUTABLE_PATH'),
     });
+    // The portal decides where a cookie-carrying window lands, and it is usually
+    // step one — so fill the form now rather than leaving it to be retyped while
+    // the slot is being taken.
+    await prefillBookingIdentity(ownBrowser.page);
     return ownBrowser.page;
   } catch (err) {
     console.warn(`[${ts()}] could not open a browser: ${err.message} — book by hand.`);
@@ -513,20 +546,27 @@ async function announceSlot(hit, session = null) {
       } catch {
         // screenshot is a nicety; carry on without it
       }
-      const done = await prepareBooking(page, offer, { screenshotPath: shot });
-      if (done.ok) {
-        console.log(
-          `\n>>> BROWSER IS READY: ${offer.officeName} — ${offer.date}, first free time selected.\n` +
-            '>>> Switch to the window and press "Pokračovať". Nothing else to fill in.\n',
-        );
-        await notifyTelegram(
-          `✅ Browser pre-filled: ${offer.officeName}, ${offer.date}. Just press Pokračovať.`,
-        );
-      } else {
-        console.warn(
-          `[${ts()}] could not pre-fill the page at step "${done.step}" (${done.detail}) — book by hand.`,
-        );
-      }
+      // Deliberately NOT awaited. The office radio only appears once the human
+      // has finished the CAPTCHA and the SMS, so this now waits minutes rather
+      // than seconds — and blocking the loop for that long would stop the hunt
+      // exactly when the next slot could be appearing.
+      prepareBooking(page, offer, { screenshotPath: shot })
+        .then(async (done) => {
+          if (done.ok) {
+            console.log(
+              `\n>>> BROWSER IS READY: ${offer.officeName} — ${offer.date}, first free time selected.\n` +
+                '>>> Switch to the window and press "Pokračovať". Nothing else to fill in.\n',
+            );
+            await notifyTelegram(
+              `✅ Browser pre-filled: ${offer.officeName}, ${offer.date}. Just press Pokračovať.`,
+            );
+          } else {
+            console.warn(
+              `[${ts()}] could not pre-fill the page at step "${done.step}" (${done.detail}) — book by hand.`,
+            );
+          }
+        })
+        .catch((err) => console.warn(`[${ts()}] booking prep failed: ${err.message} — book by hand.`));
     }
   }
 
