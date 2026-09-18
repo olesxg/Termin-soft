@@ -126,7 +126,60 @@ export function parseCookieHeader(header) {
  * Either way this beats having no window at all, and the cookies are the same
  * ones the monitor has been polling with successfully.
  */
-export async function openSessionBrowser(chromium, session, startUrl, { executablePath } = {}) {
+/**
+ * Write down every call this page makes to the portal.
+ *
+ * Booking cannot be automated while the request that creates a reservation has
+ * never been seen: no capture has ever gone past the date step, and the portal's
+ * own bundle is obfuscated — every resource id is a lookup into an encoded
+ * string array, so "create-pincode" and "offices-service-date" do not appear in
+ * it as text. Guessing the endpoint would mean firing an invented POST carrying
+ * real identity data at a government backend, which is not something to try.
+ *
+ * Observing it costs nothing, though, and does not even need the booking to
+ * succeed: pressing "Pokračovať" sends the request whether the slot is still
+ * free or already taken. One press — won or lost — and the id and payload are
+ * known exactly, including any token the step carries.
+ *
+ * capture-session already records its own window. This is the window the
+ * monitor opens, which until now recorded nothing.
+ */
+export function recordRequests(page, file, { fs, maxBodyChars = 20_000 } = {}) {
+  if (!file || !fs) return;
+
+  page.on('response', async (response) => {
+    const request = response.request();
+    const url = response.url();
+    if (!/minv\.sk/.test(url)) return;
+    if (!['xhr', 'fetch', 'document'].includes(request.resourceType())) return;
+
+    let body = '';
+    try {
+      body = (await response.text()).slice(0, maxBodyChars);
+    } catch {
+      // body already discarded — the metadata is the valuable part anyway
+    }
+
+    const entry = {
+      at: new Date().toISOString(),
+      method: request.method(),
+      url,
+      status: response.status(),
+      resourceId: (url.match(/res\/id=([^/]+)/) ?? [])[1] ?? null,
+      requestHeaders: await request.allHeaders().catch(() => ({})),
+      postData: request.postData() ?? '',
+      responseBody: body,
+    };
+
+    try {
+      fs.appendFileSync(file, `${JSON.stringify(entry)}\n`, 'utf8');
+    } catch {
+      // never let bookkeeping break a booking in progress
+    }
+  });
+}
+
+export async function openSessionBrowser(chromium, session, startUrl, { executablePath, recordTo, fs } = {}) {
   const browser = await chromium.launch({
     headless: false,
     executablePath: executablePath || undefined,
@@ -138,6 +191,7 @@ export async function openSessionBrowser(chromium, session, startUrl, { executab
   if (cookies.length > 0) await context.addCookies(cookies);
 
   const page = await context.newPage();
+  recordRequests(page, recordTo, { fs });
   await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
   return { browser, page };
 }

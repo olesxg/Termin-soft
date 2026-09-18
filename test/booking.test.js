@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { firstOffer, SELECTORS, prepareBooking, parseCookieHeader } from '../src/booking.js';
+import { firstOffer, SELECTORS, prepareBooking, parseCookieHeader, recordRequests } from '../src/booking.js';
 
 const REAL_SAMPLE = JSON.stringify([
   {
@@ -137,4 +137,67 @@ test('the office wait timeout is configurable', async () => {
 
   await prepareBooking(page, firstOffer(REAL_SAMPLE), { officeTimeoutMs: 1234 });
   assert.equal(got, 1234);
+});
+
+/** Minimal Playwright doubles: one response, delivered to the 'response' handler. */
+const responseDouble = ({ url, status = 200, method = 'POST', postData = '', body = '{}' }) => ({
+  url: () => url,
+  status: () => status,
+  text: async () => body,
+  request: () => ({
+    method: () => method,
+    resourceType: () => 'xhr',
+    allHeaders: async () => ({ cookie: 'JSESSIONID=x' }),
+    postData: () => postData,
+  }),
+});
+
+const recordingPage = () => {
+  const handlers = {};
+  return { on: (ev, fn) => { handlers[ev] = fn; }, fire: (resp) => handlers.response(resp) };
+};
+
+const fsDouble = () => {
+  const lines = [];
+  return { lines, appendFileSync: (_f, line) => lines.push(JSON.parse(line)) };
+};
+
+test('the booking window records the resource id and payload', async () => {
+  // This is what makes auto-booking possible at all: the reservation request has
+  // never been seen, and pressing Pokračovať reveals it even if the race is lost.
+  const page = recordingPage();
+  const fs = fsDouble();
+  recordRequests(page, 'log.jsonl', { fs });
+
+  await page.fire(responseDouble({
+    url: 'https://portal.minv.sk/wps/portal/x/res/id=reservation-create/=/?tida=0',
+    postData: 'data=%7B%22branchPublicId%22%3A%22abc%22%7D',
+    body: '{"code":"200"}',
+  }));
+
+  assert.equal(fs.lines.length, 1);
+  assert.equal(fs.lines[0].resourceId, 'reservation-create');
+  assert.equal(fs.lines[0].method, 'POST');
+  assert.match(fs.lines[0].postData, /branchPublicId/);
+  assert.equal(fs.lines[0].responseBody, '{"code":"200"}');
+});
+
+test('calls to anything but the portal are not recorded', async () => {
+  const page = recordingPage();
+  const fs = fsDouble();
+  recordRequests(page, 'log.jsonl', { fs });
+
+  await page.fire(responseDouble({ url: 'https://www.google-analytics.com/collect' }));
+  assert.equal(fs.lines.length, 0);
+});
+
+test('a failing write never breaks a booking in progress', async () => {
+  const page = recordingPage();
+  recordRequests(page, 'log.jsonl', {
+    fs: { appendFileSync: () => { throw new Error('disk full'); } },
+  });
+
+  await page.fire(responseDouble({ url: 'https://portal.minv.sk/wps/portal/x/res/id=whatever/=/' }));
+  // Reaching here without throwing is the assertion.
+  assert.ok(true);
 });

@@ -474,9 +474,22 @@ async function bookingPage(session) {
   try {
     console.log(`[${ts()}] opening a browser on ${session.label}'s cookies...`);
     const { chromium } = await import('playwright');
+    // Record what this window sends. The reservation request has never been
+    // seen, and it is the one thing standing between here and booking without a
+    // human — pressing "Pokračovať" reveals it even when the race is lost.
+    const bookingLog = path.join(str('CAPTURE_DIR', 'captured'), 'booking-requests.jsonl');
+    try {
+      fs.mkdirSync(path.dirname(bookingLog), { recursive: true });
+    } catch {
+      // directory already there, or unwritable — recording is best effort
+    }
+
     ownBrowser = await openSessionBrowser(chromium, session, str('START_URL', 'https://pes.minv.sk/'), {
       executablePath: str('CHROMIUM_EXECUTABLE_PATH'),
+      recordTo: bookingLog,
+      fs,
     });
+    console.log(`[${ts()}] recording this window's calls -> ${bookingLog}`);
     // The portal decides where a cookie-carrying window lands, and it is usually
     // step one — so fill the form now rather than leaving it to be retyped while
     // the slot is being taken.
