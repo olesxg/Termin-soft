@@ -28,6 +28,8 @@ const config = {
   headless: bool('HEADLESS', false),
   outDir: str('CAPTURE_DIR', 'captured'),
   maxBodyChars: num('CAPTURE_MAX_BODY', 20_000),
+  // 4x Playwright's 30s default — the portal can be slow to answer.
+  navTimeoutMs: num('NAV_TIMEOUT_MS', 120_000),
   noSlotsPhrases: list('NO_SLOTS_TEXT', PORTAL_NO_SLOTS_PHRASES),
 };
 
@@ -462,6 +464,11 @@ async function main() {
   });
   const context = await browser.newContext({ viewport: null, locale: 'sk-SK' });
   const page = await context.newPage();
+  // Slow connections were timing out on the very first load at Playwright's
+  // 30s default, before the wizard even appeared. Applies to every wait on
+  // this page, so later steps get the same headroom.
+  page.setDefaultNavigationTimeout(config.navTimeoutMs);
+  page.setDefaultTimeout(config.navTimeoutMs);
 
   page.on('response', async (response) => {
     const request = response.request();
@@ -509,7 +516,7 @@ async function main() {
   console.log('Session capture — walk the wizard by hand, everything is recorded.');
   console.log('NOTE: the log will contain your name, document number and SMS PIN.');
   console.log(`      ${config.outDir}/ is gitignored — delete it once .env works.\n`);
-  await page.goto(config.startUrl, { waitUntil: 'domcontentloaded' });
+  await page.goto(config.startUrl, { waitUntil: 'domcontentloaded', timeout: config.navTimeoutMs });
 
   if (bool('PREFILL_IDENTITY', true)) await prefillIdentity(page);
 
