@@ -22,12 +22,17 @@ import { detectSlots, normalize, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js
 import { parseBodiesFile, interleavePrimary } from './src/bodies.js';
 import { readPortalStatus, backoffDelay } from './src/portal.js';
 import { alignedDelayMs, minuteOffsetOf } from './src/schedule.js';
-import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions, serviceLabelOf } from './src/sessions.js';
+import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions, serviceLabelOf, sessionAgeMin } from './src/sessions.js';
 import { writeStatus, readStatus } from './src/status.js';
 import { mirrorConsoleTo } from './src/logfile.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 import { firstOffer, prepareBooking, openSessionBrowser } from './src/booking.js';
-import { readIdentity, fillIdentity, enterWizard } from './src/identity.js';
+import { readIdentity, fillIdentity, enterWizard, IDENTITY_FIELDS } from './src/identity.js';
+import { dueForRefresh, refreshedBody, serviceLabel } from './src/services-step.js';
+import { record, withTabId, nextTabId, markTabId } from './src/experiment.js';
+import { appendSessionRecord, readSessionsFile } from './src/sessionfile.js';
+import { relogin } from './src/relogin.js';
+import { awaitCode } from './src/telegram.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -178,6 +183,31 @@ const config = {
   // One is enough: the budget does not recover, so a second CALL_LIMIT on the
   // same session only spends a poll to learn what the first one already said.
   callLimitRetireAfter: num('CALL_LIMIT_RETIRE_AFTER', 1),
+
+  onlyService: str('ONLY_SERVICE'),
+  office: str('OFFICE'),
+  dateMarker: str('DATE_ENDPOINT_MARKER', 'available-offices-service-date'),
+
+  // Hypothesis 1 — replay the wizard's services step every N date calls, on the
+  // chance that the call counter belongs to the context that step creates. Off
+  // by default: an unproven guess must not quietly spend a budget of six.
+  servicesRefresh: bool('SERVICES_REFRESH', false),
+  servicesRefreshEvery: num('SERVICES_REFRESH_EVERY', 3),
+  // The two steps are one human action, a couple of seconds apart. The pace
+  // between PAIRS stays INTERVAL_MS, which is where the human tempo lives.
+  servicesRefreshGapMs: num('SERVICES_REFRESH_GAP_MS', 2000),
+  experimentLog: str('EXPERIMENT_LOG', 'experiment.jsonl'),
+
+  // Hypothesis 3 — tida looks like a tab id. On CALL_LIMIT, retry the session
+  // under the next tab id instead of burying it. Empty = off.
+  tidaRetry: list('TIDA_RETRY_VALUES', []),
+
+  // An empty pool used to end the run. A watchdog instead opens a window, fills
+  // the form, asks for the CAPTCHA on the phone and waits — the monitor is the
+  // thing that must not stop. Falls back to exiting when no browser can open.
+  watchdog: bool('WATCHDOG_ON_EMPTY_POOL', true),
+  watchdogPollMs: num('WATCHDOG_POLL_MS', 30_000),
+  smsViaTelegram: bool('SMS_CODE_VIA_TELEGRAM', false),
 };
 
 /**
@@ -220,7 +250,7 @@ function loadSessions() {
     // a pool built before ONLY_SERVICE was set — or topped up from an older
     // file — keeps asking about services you never wanted, and every one of
     // those spends a call from a budget of roughly five per session.
-    const only = str('ONLY_SERVICE');
+    const only = config.onlyService;
     let usable = fresh;
     if (only) {
       const want = normalize(only);
@@ -255,6 +285,7 @@ function loadSessions() {
       csrfToken: config.csrfToken,
       csrfHeaderName: config.csrfHeaderName,
       referer: config.referer,
+      servicesStep: json('SERVICES_STEP', null),
     },
   ]).sessions;
 }
@@ -331,7 +362,11 @@ function buildHeaders(session) {
   if (referer) headers.Referer = referer;
   if (config.origin) headers.Origin = config.origin;
   if (csrfToken) headers[session.csrfHeaderName ?? config.csrfHeaderName] = csrfToken;
-  if (config.method !== 'GET' && config.bodies.some((e) => e.body)) headers['Content-Type'] = config.contentType;
+
+  const method = session.method ?? config.method;
+  if (method !== 'GET' && (session.body || config.bodies.some((e) => e.body))) {
+    headers['Content-Type'] = config.contentType;
+  }
 
   return { ...headers, ...config.extraHeaders };
 }
@@ -362,6 +397,8 @@ let burstLeft = 0;
 /** Minute offset a slot was last seen on — null while still scanning. */
 let huntOffset = null;
 let sessionCursor = -1;
+/** How the last session died, so an empty pool can say why in one place. */
+let poolDeath = null;
 
 /** Rotate through the configured bodies, one per poll. */
 /** A unique URL per poll, so no two requests are identical on the wire. */
@@ -393,7 +430,16 @@ function pruneSessionsFile() {
   const live = liveSessions(sessions);
   if (live.length === sessions.length) return;
 
-  const stripped = live.map(({ dead, reason, calls, label, ...rest }) => ({ label, ...rest }));
+  // The file says how to replay a session, never how this run used one — that
+  // belongs in EXPERIMENT_LOG. Counters left behind here would be read back as
+  // session state: a stale callsSinceRefresh makes a refresh due on the first
+  // call of the next run, and a stale triedTabIds silently ends the tida test.
+  const stripped = live.map(
+    ({ dead, reason, calls, callLimits, callsSinceRefresh, refreshes, triedTabIds, tabId, label, ...rest }) => ({
+      label,
+      ...rest,
+    }),
+  );
   try {
     fs.writeFileSync(config.sessionsFile, `${JSON.stringify(stripped, null, 2)}\n`, 'utf8');
     console.log(
@@ -597,32 +643,131 @@ async function announceSlot(hit, session = null) {
   console.log(`[${ts()}] still polling — that slot may already be gone.`);
 }
 
+/** The service a refreshed context must be re-aimed at. */
+function serviceNeedleOf(session) {
+  if (config.onlyService) return config.onlyService;
+  const label = session.service?.label;
+  return label && !/^[0-9a-f-]{8,}$/i.test(label) ? label : '';
+}
+
+/** One row per date call — the measurement the whole experiment rests on. */
+function noteDateCall(session, outcome) {
+  record(config.experimentLog, {
+    kind: 'date',
+    label: session.label,
+    outcome,
+    dateCalls: session.calls,
+    callsSinceRefresh: session.callsSinceRefresh ?? 0,
+    refreshes: session.refreshes ?? 0,
+    ageMin: sessionAgeMin(session),
+    tabId: session.tabId ?? null,
+  });
+}
+
+/** Retire a session, and write down what it managed before it died. */
+function bury(session, reason) {
+  retireSession(session, reason);
+  record(config.experimentLog, {
+    kind: 'retire',
+    label: session.label,
+    reason,
+    ageMin: sessionAgeMin(session),
+    dateCalls: session.calls,
+    refreshes: session.refreshes ?? 0,
+    callsSinceRefresh: session.callsSinceRefresh ?? 0,
+    tabId: session.tabId ?? null,
+  });
+  return session;
+}
+
+/**
+ * Replay the services step, then re-point the date body at the ids it returns.
+ * Costs one call — the whole bet of hypothesis 1.
+ */
+async function refreshServicesContext(session) {
+  const step = session.servicesStep;
+  const note = (ok, reason, extra = {}) => {
+    record(config.experimentLog, {
+      kind: 'refresh',
+      ok,
+      reason,
+      label: session.label,
+      ageMin: sessionAgeMin(session),
+      dateCalls: session.calls,
+      refreshes: session.refreshes ?? 0,
+      ...extra,
+    });
+    return { ok, reason };
+  };
+
+  if (!step?.url || !step?.body) return note(false, 'no services step recorded — re-capture to get one');
+
+  const headers = buildHeaders(session);
+  if (step.contentType) headers['Content-Type'] = step.contentType;
+  if (step.referer) headers.Referer = step.referer;
+
+  let response;
+  try {
+    response = await client.request({ url: step.url, method: step.method ?? 'POST', headers, data: step.body });
+  } catch (err) {
+    return note(false, `request failed: ${err.code ?? err.message}`);
+  }
+
+  if (response.status !== 200) return note(false, `HTTP ${response.status}`);
+
+  const portal = readPortalStatus(response.data);
+  if (portal.expired) return note(false, 'answered {} — the context is already gone');
+  if (portal.authFailed) return note(false, `code ${portal.code}`);
+  if (portal.callLimit) return note(false, 'CALL_LIMIT on the services step itself');
+
+  const template = session.body ?? currentEntry().body;
+  const refreshed = refreshedBody(template, response.data, serviceNeedleOf(session));
+  if (!refreshed) return note(false, 'the answer named no service we are watching');
+
+  const changed = refreshed.body !== template;
+  session.body = refreshed.body;
+  session.service = { id: refreshed.service.id, label: serviceLabel(refreshed.service) };
+  session.refreshes = (session.refreshes ?? 0) + 1;
+  session.callsSinceRefresh = 0;
+
+  console.log(
+    `[${ts()}] ${session.label}: services step replayed — ${serviceLabel(refreshed.service)}` +
+      (changed ? ` (new id ${refreshed.service.id})` : ' (same id as before)'),
+  );
+  return note(true, changed ? 'new service id' : 'same service id', { serviceId: refreshed.service.id });
+}
+
 async function pingOnce(session) {
+  if (config.servicesRefresh && dueForRefresh(session, config.servicesRefreshEvery)) {
+    await refreshServicesContext(session);
+    await new Promise((resolve) => setTimeout(resolve, config.servicesRefreshGapMs));
+  }
+
   session.calls += 1;
+  session.callsSinceRefresh = (session.callsSinceRefresh ?? 0) + 1;
+
+  const method = session.method ?? config.method;
   const response = await client.request({
     url: requestUrl(session),
-    method: config.method,
+    method,
     headers: buildHeaders(session),
-    data: config.method === 'GET' ? undefined : (session.body ?? currentEntry().body) || undefined,
+    data: method === 'GET' ? undefined : (session.body ?? currentEntry().body) || undefined,
   });
 
   const { status, data } = response;
 
   if (status === 401 || status === 403) {
-    retireSession(session, `HTTP ${status}`);
+    noteDateCall(session, `http-${status}`);
+    bury(session, `HTTP ${status}`);
+    poolDeath = {
+      push: `⛔️ HTTP ${status} — every session expired or the IP got blocked.`,
+      exit:
+        '\nEvery session is dead (401/403). Walk the wizard again and restart.\n' +
+        'A 403 on the very first ping usually means the IP is blocked — turn on a Slovak/Czech VPN.',
+    };
     console.error(
       `[${ts()}] HTTP ${status} — ${session.label} rejected. Still live: ${liveSessions(sessions).length}`,
     );
-    if (liveSessions(sessions).length === 0) {
-      await notifyTelegram(
-        `⛔️ Termín monitor stopped: HTTP ${status}. Every session expired or the IP got blocked — redo the wizard.`,
-      );
-      shutdown(
-        1,
-        '\nEvery session is dead (401/403). Walk the wizard again and restart.\n' +
-          'A 403 on the very first ping usually means the IP is blocked — turn on a Slovak/Czech VPN.',
-      );
-    }
     return TRY_NEXT_SESSION;
   }
 
@@ -660,28 +805,52 @@ async function pingOnce(session) {
   // outcome as a 401, and it must be handled before detectSlots, which would
   // otherwise call it "inconclusive" and keep polling a corpse.
   if (portal.expired) {
-    retireSession(session, 'expired ({} response)');
+    noteDateCall(session, 'expired');
+    bury(session, 'expired ({} response)');
     writeStatus({ lastResult: 'expired', lastPingAt: new Date().toISOString(), pings });
-    console.error(
-      `\n[${ts()}] ${session.label} answered {} — session context expired. Still live: ${liveSessions(sessions).length}`,
-    );
-    if (liveSessions(sessions).length === 0) {
-      await notifyTelegram(
-        '⛔️ Termín monitor stopped: every session expired (empty {} answers). Re-capture to carry on.',
-      );
-      shutdown(
-        1,
+    poolDeath = {
+      push: '⛔️ Every session expired (empty {} answers).',
+      exit:
         '\nEvery session has expired — the portal still accepts the cookie but has dropped the\n' +
-          'booking context, so it answers {}. Sessions last about an hour. Run: npm run capture.\n',
-      );
-    }
+        'booking context, so it answers {}. Sessions last about an hour. Run: npm run capture.\n',
+    };
+    console.error(
+      `\n[${ts()}] ${session.label} answered {} — session context expired after ${sessionAgeMin(session) ?? '?'}min. ` +
+        `Still live: ${liveSessions(sessions).length}`,
+    );
     return TRY_NEXT_SESSION;
   }
 
   if (portal.callLimit) {
     callLimitHits += 1;
     session.callLimits = (session.callLimits ?? 0) + 1;
+    noteDateCall(session, 'call-limit');
     writeStatus({ lastResult: 'call-limit', callLimitHits, lastPingAt: new Date().toISOString(), pings });
+
+    // Hypothesis 3: a counter kept per tab would give the next tida its own
+    // budget. A session that just hit CALL_LIMIT is spent anyway, so this costs
+    // one call to find out and nothing if it fails.
+    const tabId = nextTabId(session, config.tidaRetry);
+    if (tabId !== null) {
+      const before = session.url;
+      markTabId(session, tabId);
+      session.url = withTabId(before, tabId);
+      session.callLimits = 0;
+      record(config.experimentLog, {
+        kind: 'tida',
+        label: session.label,
+        tabId: String(tabId),
+        dateCalls: session.calls,
+        ageMin: sessionAgeMin(session),
+      });
+      console.warn(
+        `\n[${ts()}] CALL_LIMIT on ${session.label} after ${session.calls} call(s) — ` +
+          `retrying it under tida=${tabId} instead of burying it.`,
+      );
+      extraWaitMs = 0;
+      networkFailures = 0;
+      return TRY_NEXT_SESSION;
+    }
 
     // CALL_LIMIT is terminal for the session that hit it: measured, the next
     // call comes back 401 whether it is sent in sixty seconds or ten minutes,
@@ -692,11 +861,15 @@ async function pingOnce(session) {
     // bad news — and an empty pool is something to be told NOW, while there is
     // still time to capture another, not after a silent wait ending in 401.
     if (session.callLimits >= config.callLimitRetireAfter) {
-      retireSession(session, `CALL_LIMIT x${session.callLimits}`);
+      bury(session, `CALL_LIMIT x${session.callLimits}`);
+      poolDeath = {
+        push: '⛔️ Every session is spent (CALL_LIMIT).',
+        exit: '\nEvery session is spent. Run: npm run capture.\n',
+      };
       const left = liveSessions(sessions).length;
       console.warn(
-        `\n[${ts()}] CALL_LIMIT — ${session.label} is spent, dropping it. Still live: ${left}` +
-          (left === 0 ? ' — pool is empty, run: npm run capture' : ''),
+        `\n[${ts()}] CALL_LIMIT — ${session.label} is spent after ${session.calls} date call(s)` +
+          `${session.refreshes ? ` and ${session.refreshes} services refresh(es)` : ''}, dropping it. Still live: ${left}`,
       );
       extraWaitMs = 0;
       networkFailures = 0;
@@ -723,24 +896,18 @@ async function pingOnce(session) {
   }
 
   if (portal.authFailed) {
-    retireSession(session, `code ${portal.code}`);
+    noteDateCall(session, `code-${portal.code}`);
+    bury(session, `code ${portal.code}`);
     writeStatus({ lastResult: 'rejected-' + portal.code, lastPingAt: new Date().toISOString(), pings });
+    poolDeath = {
+      push: `⛔️ Portal returned code ${portal.code} — every session is spent.`,
+      exit:
+        '\nEvery session has been rejected — the portal says so in the body, not the HTTP status.\n' +
+        'Run: npm run capture, walk the wizard again, then restart the monitor.\n',
+    };
     console.error(
       `\n[${ts()}] portal says code ${portal.code} — ${session.label} is gone. Still live: ${liveSessions(sessions).length}`,
     );
-
-    // Only the LAST session dying ends the run. Retiring one of several is
-    // routine — each carries its own budget and they expire at different times.
-    if (liveSessions(sessions).length === 0) {
-      await notifyTelegram(
-        `⛔️ Termín monitor stopped: portal returned code ${portal.code}. Every session is spent — redo the wizard.`,
-      );
-      shutdown(
-        1,
-        '\nEvery session has been rejected — the portal says so in the body, not the HTTP status.\n' +
-          'Run: npm run capture, walk the wizard again, then restart the monitor.\n',
-      );
-    }
     return TRY_NEXT_SESSION;
   }
 
@@ -757,11 +924,13 @@ async function pingOnce(session) {
     jsonPath: config.jsonPath,
   });
 
+  const outcome = result.available === true ? 'SLOT' : result.available === false ? 'no-slots' : 'inconclusive';
+  noteDateCall(session, outcome);
+
   writeStatus({
     lastPingAt: new Date().toISOString(),
     pings,
-    lastResult:
-      result.available === true ? 'SLOT' : result.available === false ? 'no-slots' : 'inconclusive',
+    lastResult: outcome,
     lastReason: result.reason,
     callLimitHits,
   });
@@ -787,6 +956,150 @@ async function pingOnce(session) {
   } else {
     process.stdout.write('.');
   }
+}
+
+/** Selector pins for identity fields whose label guess went wrong. */
+function identityOverrides() {
+  return Object.fromEntries(
+    IDENTITY_FIELDS.map((field) => [field.env, str(`${field.env}_SELECTOR`)]).filter(([, value]) => value),
+  );
+}
+
+/** Take a freshly captured session into the live pool and onto disk. */
+function adoptSession(entry) {
+  const { sessions: parsed, skipped } = parseSessions([entry]);
+  if (parsed.length === 0) {
+    console.warn(`[${ts()}] the new session is not replayable: ${skipped.join('; ')}`);
+    return false;
+  }
+
+  const { size } = appendSessionRecord(config.sessionsFile, entry);
+  const { merged, added } = mergeSessions(sessions, parsed);
+
+  // Same cookie as a session already buried: reporting success here would leave
+  // the pool empty and send the watchdog straight back round.
+  if (added.length === 0) {
+    console.warn(`[${ts()}] ${entry.label} carries a cookie the pool already knows — nothing adopted.`);
+    return false;
+  }
+
+  usingSessionsFile = true;
+  sessions = merged;
+  sessionCursor = -1;
+  console.log(`\n[${ts()}] ${entry.label} joined the pool (${size} in ${config.sessionsFile}) — polling resumes.`);
+  return true;
+}
+
+/**
+ * @returns {Promise<boolean>} false when the login could not finish — the
+ *   window stays open and the passive wait below takes over.
+ */
+async function watchdogRelogin() {
+  let chromium;
+  try {
+    ({ chromium } = await import('playwright'));
+  } catch (err) {
+    console.error(`[${ts()}] no browser available (${err.message}) — cannot re-login from here.`);
+    return false;
+  }
+
+  try {
+    const outcome = await relogin({
+      chromium,
+      startUrl: str('START_URL', 'https://pes.minv.sk/'),
+      executablePath: str('CHROMIUM_EXECUTABLE_PATH'),
+      service: config.onlyService,
+      office: config.office,
+      dateMarker: config.dateMarker,
+      overrides: identityOverrides(),
+      poolIndex: readSessionsFile(config.sessionsFile).length + 1,
+      readCode: config.smsViaTelegram
+        ? () =>
+            awaitCode({
+              token: str('TELEGRAM_BOT_TOKEN'),
+              chatId: str('TELEGRAM_CHAT_ID'),
+              timeoutMs: num('SMS_CODE_TIMEOUT_MS', 10 * 60_000),
+              log: (message) => console.log(`[${ts()}] sms: ${message}`),
+            })
+        : null,
+      notify: notifyTelegram,
+      log: (message) => console.log(`[${ts()}] relogin: ${message}`),
+    });
+
+    if (!outcome.ok) {
+      console.warn(`[${ts()}] re-login never reached the dates: ${outcome.reason}`);
+      await notifyTelegram(`⚠️ Re-login nedokončený: ${outcome.reason}. Okno je otvorené — dokonči ho ručne.`);
+      return false;
+    }
+
+    if (!adoptSession(outcome.session)) return false;
+    // Keep the window: it is sitting on the date step, which is exactly where a
+    // slot has to be booked. A browser opened later from cookies alone is not.
+    ownBrowser = { browser: outcome.browser, page: outcome.page };
+    await notifyTelegram(`✅ Nová sesia v poole (${outcome.session.label}) — monitor pokračuje.`);
+    return true;
+  } catch (err) {
+    console.error(`[${ts()}] watchdog re-login failed: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * The passive half of the watchdog: `npm run capture` in another window is
+ * still the most reliable way to make a session, and the monitor has to be the
+ * thing already running when one appears.
+ */
+async function waitForFreshSession() {
+  console.warn(
+    `\n[${ts()}] waiting for a session in ${config.sessionsFile} — run \`npm run capture\`.\n` +
+      '  The monitor stays up and adopts it by itself. Nothing is lost by leaving this running.',
+  );
+
+  while (running) {
+    await new Promise((resolve) => setTimeout(resolve, config.watchdogPollMs));
+
+    const fromFile = freshSessions(parseSessions(readSessionsFile(config.sessionsFile)).sessions, IDLE_DEATH_MIN);
+    const { merged, added } = mergeSessions(sessions, fromFile);
+    if (added.length === 0) continue;
+
+    sessions = merged;
+    usingSessionsFile = true;
+    sessionCursor = -1;
+    console.log(`\n[${ts()}] adopted ${added.map((s) => s.label).join(', ')} — polling resumes.`);
+    await notifyTelegram('✅ Monitor pokračuje — nová sesia je v poole.');
+    return;
+  }
+}
+
+/**
+ * An empty pool is a call for help, not a reason to stop: exiting here meant
+ * the one process that could alert on a slot was gone by the time anyone
+ * looked. Exiting is now only the fallback for having no browser at all.
+ */
+async function handleEmptyPool() {
+  const death = poolDeath ?? {
+    push: '⛔️ Every captured session is spent.',
+    exit: '\nEvery session is spent. Run: npm run capture.\n',
+  };
+  poolDeath = null;
+
+  if (!config.watchdog) {
+    await notifyTelegram(`${death.push} Termín monitor stopped — redo the wizard.`);
+    shutdown(1, death.exit);
+    return;
+  }
+
+  console.warn(`\n[${ts()}] pool is empty — the watchdog takes over instead of exiting.`);
+  writeStatus({ lastResult: 'pool-empty', lastReason: death.push, poolEmptyAt: new Date().toISOString() });
+  await notifyTelegram(`${death.push}\n\nPotrebná CAPTCHA + SMS. Monitor nebeží naprázdno — čaká na novú sesiu.`);
+
+  if (await watchdogRelogin()) {
+    writeStatus({ lastResult: 'recovered', poolEmptyAt: null });
+    return;
+  }
+
+  await waitForFreshSession();
+  writeStatus({ lastResult: 'recovered', poolEmptyAt: null });
 }
 
 async function loop() {
@@ -832,6 +1145,21 @@ async function loop() {
     }
   }
   console.log(`  no-slots : ${config.noSlotsPhrases.join(' | ') || '(none configured)'}`);
+  if (config.servicesRefresh) {
+    const recorded = sessions.filter((s) => s.servicesStep?.url).length;
+    console.log(
+      `  hypothesis: services step replayed every ${config.servicesRefreshEvery} date call(s) — ` +
+        `${recorded}/${sessions.length} session(s) carry one`,
+    );
+    if (recorded === 0) {
+      console.warn('  !! No session has a recorded services step. Re-capture, or the refresh does nothing.');
+    }
+  }
+  if (config.tidaRetry.length > 0) {
+    console.log(`  hypothesis: on CALL_LIMIT, retry under tida=${config.tidaRetry.join(', then ')}`);
+  }
+  if (config.experimentLog) console.log(`  log      : ${config.experimentLog} (npm run experiment)`);
+  console.log(`  on empty : ${config.watchdog ? 'open a window, ask for the CAPTCHA, keep watching' : 'exit'}`);
   if (config.budgetWindowMin > 0) {
     console.log(`  budget   : ~${config.callBudget} calls spread over ${config.budgetWindowMin} min`);
   }
@@ -874,11 +1202,7 @@ async function loop() {
       let answeredBy = null;
       for (let attempt = 0; attempt < sessions.length && running; attempt += 1) {
         const turn = nextSession(sessions, sessionCursor);
-        if (!turn) {
-          await notifyTelegram('⛔️ Termín monitor stopped: every captured session is spent.');
-          shutdown(1, '\nEvery session is spent. Run: npm run capture.\n');
-          break;
-        }
+        if (!turn) break;
         sessionCursor = turn.cursor;
 
         const outcome = await pingOnce(turn.session);
@@ -893,6 +1217,11 @@ async function loop() {
       }
 
       if (hit) await announceSlot(hit, answeredBy);
+
+      // Checked here rather than inside pingOnce: the last session can die on
+      // any of five different answers, and handling it in one place is what
+      // lets the watchdog exist at all.
+      if (running && liveSessions(sessions).length === 0) await handleEmptyPool();
     } catch (err) {
       // A connection that never reached the server costs no call budget, so
       // giving up would only lose slots — the session is still intact. Back off

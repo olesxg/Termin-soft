@@ -1,4 +1,5 @@
 import { isThirdPartyHost } from './hosts.js';
+import { serviceIdOf } from './bodies.js';
 /**
  * Several captured sessions, polled in rotation.
  *
@@ -121,6 +122,13 @@ export function mergeSessions(current, incoming) {
   return { merged: [...current, ...added], added };
 }
 
+/** Minutes since the session was captured, or null when the age is unknown. */
+export function sessionAgeMin(session) {
+  const at = Date.parse(session?.capturedAt ?? '');
+  if (Number.isNaN(at)) return null;
+  return Math.round((Date.now() - at) / 60_000);
+}
+
 /**
  * Drop sessions too old to still be authenticated.
  *
@@ -153,7 +161,7 @@ export function serviceLabelOf(session, fallback = null) {
   if (session?.service?.label) return session.service.label;
   if (session?.service?.id) return session.service.id;
   if (session?.body) {
-    const id = (decodeURIComponent(session.body).match(/"serviceBranchID"\s*:\s*"([^"]+)"/) ?? [])[1];
+    const id = serviceIdOf(session.body);
     if (id) return id; // no name recorded — the id is still honest
   }
   return fallback; // no body: the rotation really is what gets sent

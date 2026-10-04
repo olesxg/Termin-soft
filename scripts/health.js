@@ -32,9 +32,15 @@ const running = isAlive(status.pid) && !status.stoppedAt;
 const budget = ((status.intervalMs ?? 60_000) + (status.jitterMs ?? 15_000)) / 1000;
 const stale = secondsSince(status.lastPingAt ?? status.startedAt) > budget * 2 + 30;
 
+// The watchdog deliberately stops polling: the pool is empty and it is waiting
+// for a CAPTCHA. Reporting that as "wedged" sends you looking for the wrong bug.
+const waitingForSession = status.lastResult === 'pool-empty';
+
 const problems = [];
 if (!running) problems.push(status.stoppedAt ? `stopped (exit ${status.exitCode ?? '?'})` : 'process is gone');
-else if (stale) problems.push(`no poll for ${ago(status.lastPingAt)} — expected one every ~${Math.round(budget)}s`);
+else if (waitingForSession) {
+  problems.push(`pool is empty since ${ago(status.poolEmptyAt)} — CAPTCHA + SMS needed, then: npm run capture`);
+} else if (stale) problems.push(`no poll for ${ago(status.lastPingAt)} — expected one every ~${Math.round(budget)}s`);
 if (String(status.lastResult ?? '').startsWith('rejected')) problems.push('the portal rejected the session');
 if (!status.telegram) problems.push('Telegram is not configured — an alert would reach nobody');
 // One is normal after a restart; a run of them means the backoff is losing.
@@ -44,7 +50,16 @@ if ((status.callLimitHits ?? 0) >= 3) {
 
 const line = (k, v) => console.log(`  ${k.padEnd(14)} ${v}`);
 
-console.log(`\n${status.lastResult === 'SLOT' ? '*** SLOT FOUND ***' : running && !stale ? 'HEALTHY' : 'NEEDS ATTENTION'}\n`);
+const headline =
+  status.lastResult === 'SLOT'
+    ? '*** SLOT FOUND ***'
+    : waitingForSession && running
+      ? 'WAITING FOR A SESSION'
+      : running && !stale
+        ? 'HEALTHY'
+        : 'NEEDS ATTENTION';
+
+console.log(`\n${headline}\n`);
 line('state', running ? `running (pid ${status.pid})` : status.stoppedAt ? `stopped ${ago(status.stoppedAt)}` : 'not running');
 line('started', `${ago(status.startedAt)}`);
 line('last poll', `${ago(status.lastPingAt)}  (#${status.pings ?? 0})`);

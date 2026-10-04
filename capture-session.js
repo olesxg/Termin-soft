@@ -21,6 +21,8 @@ import { scoreRequest, countDates } from './src/rank.js';
 import { readEnvValues } from './src/envfile.js';
 import { extractServices, buildRotation, bodyForService, matchServices } from './src/bodies.js';
 import { readIdentity, fillIdentity, enterWizard, IDENTITY_FIELDS } from './src/identity.js';
+import { findServicesStep } from './src/services-step.js';
+import { appendSessionRecord, readSessionsFile, sessionRecord } from './src/sessionfile.js';
 
 const config = {
   startUrl: str('START_URL', 'https://pes.minv.sk/'),
@@ -31,10 +33,17 @@ const config = {
   // 4x Playwright's 30s default — the portal can be slow to answer.
   navTimeoutMs: num('NAV_TIMEOUT_MS', 120_000),
   noSlotsPhrases: list('NO_SLOTS_TEXT', PORTAL_NO_SLOTS_PHRASES),
+  dateMarker: str('DATE_ENDPOINT_MARKER', 'available-offices-service-date'),
 };
 
 const captured = [];
 let logOpen = true;
+
+/**
+ * The browser's own clicks spend the budget too — a trip back to the service
+ * list and forward again is another call, so count them out loud.
+ */
+let dateCalls = 0;
 
 /** Latest credentials seen on the wire, in case the browser dies before the dump. */
 const lastSeen = { cookie: '', userAgent: '' };
@@ -153,6 +162,10 @@ function carryOverSettings() {
       'INTERVAL_MS', 'JITTER_MS', 'HEARTBEAT_EVERY',
       'POLL_ALIGN_MINUTE_MOD', 'POLL_ALIGN_MINUTE_OFFSET', 'POLL_ALIGN_SECOND',
       'POLL_BURST', 'POLL_BURST_SPACING_MS', 'POLL_BURST_AFTER_HIT',
+      // An experiment that is silently switched off by the next re-capture is
+      // not an experiment, and re-capturing is the routine case here.
+      'SERVICES_REFRESH', 'SERVICES_REFRESH_EVERY', 'EXPERIMENT_LOG', 'TIDA_RETRY_VALUES',
+      'WATCHDOG_ON_EMPTY_POOL', 'SMS_CODE_VIA_TELEGRAM', 'OFFICE',
       // Losing these would put the six fields back on the human every capture —
       // the exact chore the prefill exists to remove.
       ...IDENTITY_FIELDS.map((f) => f.env),
@@ -178,6 +191,12 @@ function carryOverSettings() {
       mod: found.POLL_ALIGN_MINUTE_MOD ?? '', offset: found.POLL_ALIGN_MINUTE_OFFSET ?? '',
       second: found.POLL_ALIGN_SECOND ?? '', burst: found.POLL_BURST ?? '', spacing: found.POLL_BURST_SPACING_MS ?? '',
       afterHit: found.POLL_BURST_AFTER_HIT ?? '',
+    },
+    lab: {
+      refresh: found.SERVICES_REFRESH ?? '', every: found.SERVICES_REFRESH_EVERY ?? '',
+      log: found.EXPERIMENT_LOG ?? '', tida: found.TIDA_RETRY_VALUES ?? '',
+      watchdog: found.WATCHDOG_ON_EMPTY_POOL ?? '', sms: found.SMS_CODE_VIA_TELEGRAM ?? '',
+      office: found.OFFICE ?? '',
     },
   };
 }
@@ -258,52 +277,40 @@ async function dumpDateStepDom(page) {
  */
 async function appendSession(best, cookieHeader, userAgent, body) {
   const file = str('SESSIONS_FILE', 'sessions.json');
-  let existing = [];
-  try {
-    const parsed = JSON.parse(await fs.readFile(file, 'utf8'));
-    if (Array.isArray(parsed)) existing = parsed;
-  } catch {
-    // no file yet — this capture starts the pool
-  }
+  const existing = readSessionsFile(file);
 
   if (existing.some((s) => s?.cookie === cookieHeader)) {
     console.log(`\n${file}: this session is already in the pool (${existing.length} total).`);
     return existing.length;
   }
 
-  const headers = best.requestHeaders ?? {};
-  const csrfEntry = Object.entries(headers).find(([name]) =>
-    /csrf|xsrf|verification.?token/i.test(name),
+  // Material for hypothesis 1, recorded on every capture because it costs
+  // nothing to carry and cannot be recovered later.
+  const servicesStep = findServicesStep(captured);
+
+  const { size } = appendSessionRecord(
+    file,
+    sessionRecord({
+      index: existing.length + 1,
+      url: best.url,
+      method: best.method,
+      headers: best.requestHeaders ?? {},
+      cookie: cookieHeader,
+      userAgent,
+      body,
+      referer: usablePageUrl(best),
+      services: captured.flatMap((entry) => extractServices(entry.responseBody)),
+      servicesStep,
+    }),
   );
 
-  // Record WHICH service this session asks about. serviceBranchIDs are
-  // regenerated every capture, so an id alone means nothing later — and without
-  // the name the monitor had to guess, printing whatever the rotation happened
-  // to be on rather than what it actually polled.
-  const serviceId = (decodeURIComponent(body ?? '').match(/"serviceBranchID"\s*:\s*"([^"]+)"/) ?? [])[1] ?? null;
-  const known = captured.flatMap((e) => extractServices(e.responseBody));
-  const match = serviceId ? known.find((s) => s.id === serviceId) : null;
-
-  existing.push({
-    // Local time, to match monitor.log — a UTC label next to local timestamps
-    // reads as a two-hour gap that never happened.
-    label: `s${existing.length + 1} ${new Date().toLocaleTimeString('sk-SK', { hour12: false }).slice(0, 5)}`,
-    capturedAt: new Date().toISOString(),
-    cookie: cookieHeader,
-    url: best.url,
-    csrfHeaderName: csrfEntry ? csrfEntry[0] : undefined,
-    csrfToken: csrfEntry ? csrfEntry[1] : undefined,
-    referer: headers.referer ?? usablePageUrl(best),
-    userAgent,
-    body,
-    service: serviceId
-      ? { id: serviceId, label: match ? `${match.group ? `${match.group} / ` : ''}${match.name}` : null }
-      : null,
-  });
-
-  await fs.writeFile(file, `${JSON.stringify(existing, null, 2)}\n`, 'utf8');
-  console.log(`\n${file}: pool is now ${existing.length} session(s) — roughly ${existing.length * 5} calls.`);
-  return existing.length;
+  console.log(`\n${file}: pool is now ${size} session(s) — roughly ${size * 5} calls.`);
+  console.log(
+    servicesStep
+      ? '  services step recorded — SERVICES_REFRESH=true can replay it (hypothesis 1).'
+      : '  no services step seen in this capture — SERVICES_REFRESH would have nothing to replay.',
+  );
+  return size;
 }
 
 async function writeEnvTemplate(best, cookieHeader, userAgent) {
@@ -381,6 +388,7 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
   // The endpoint answers {"services":[...]} on the ECU flow; anywhere else let
   // the detector find the array itself.
   const isEcuDateEndpoint = /available-offices-service-date/.test(best.url);
+  const servicesStep = findServicesStep(captured);
 
   const lines = [
     '# Generated by capture-session.js — review, then: cp .env.captured .env',
@@ -425,6 +433,20 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
     carried.align.afterHit ? envLine('POLL_BURST_AFTER_HIT', carried.align.afterHit) : '# POLL_BURST_AFTER_HIT=4',
     envLine('NO_SLOTS_TEXT', config.noSlotsPhrases.join(',')),
     isEcuDateEndpoint ? envLine('SLOT_JSON_PATH', 'services') : '# SLOT_JSON_PATH=data.terms',
+    '',
+    '# Hypothesis 1: the date endpoint may count calls per wizard context, not',
+    '# per session. SERVICES_REFRESH replays the step below every few calls and',
+    '# writes the outcome to EXPERIMENT_LOG. Off until it is proven.',
+    servicesStep ? envLine('SERVICES_STEP', JSON.stringify(servicesStep)) : '# SERVICES_STEP=',
+    carried.lab.refresh ? envLine('SERVICES_REFRESH', carried.lab.refresh) : '# SERVICES_REFRESH=true',
+    carried.lab.every ? envLine('SERVICES_REFRESH_EVERY', carried.lab.every) : '# SERVICES_REFRESH_EVERY=3',
+    carried.lab.log ? envLine('EXPERIMENT_LOG', carried.lab.log) : '# EXPERIMENT_LOG=experiment.jsonl',
+    carried.lab.tida ? envLine('TIDA_RETRY_VALUES', carried.lab.tida) : '# TIDA_RETRY_VALUES=1,2',
+    '',
+    '# When the pool empties: open a window and ask for the CAPTCHA, or exit.',
+    carried.lab.watchdog ? envLine('WATCHDOG_ON_EMPTY_POOL', carried.lab.watchdog) : '# WATCHDOG_ON_EMPTY_POOL=true',
+    carried.lab.sms ? envLine('SMS_CODE_VIA_TELEGRAM', carried.lab.sms) : '# SMS_CODE_VIA_TELEGRAM=true',
+    carried.lab.office ? envLine('OFFICE', carried.lab.office) : '# OFFICE=',
     '',
     carried.token ? envLine('TELEGRAM_BOT_TOKEN', carried.token) : '# TELEGRAM_BOT_TOKEN=',
     carried.chatId ? envLine('TELEGRAM_CHAT_ID', carried.chatId) : '# TELEGRAM_CHAT_ID=',
@@ -511,6 +533,14 @@ async function main() {
       }
     }
     console.log(`  [${entry.status}] ${entry.method} ${entry.url.slice(0, 120)}`);
+
+    if (entry.status === 200 && entry.url.includes(config.dateMarker)) {
+      dateCalls += 1;
+      console.log(`     ^^ date endpoint, call #${dateCalls} of this session's budget`);
+      if (dateCalls === 2) {
+        console.log('     !! going back and forth between services spends calls. Pick once, then stop.');
+      }
+    }
   });
 
   console.log('Session capture — walk the wizard by hand, everything is recorded.');
@@ -530,6 +560,11 @@ async function main() {
   rl.close();
 
   await dumpDateStepDom(page);
+
+  console.log(
+    `\nThis walk spent ${dateCalls} call(s) on the date endpoint` +
+      (dateCalls > 1 ? ` — ${dateCalls - 1} more than the one it needs, so the monitor starts poorer.` : '.'),
+  );
 
   // The browser may already be gone — closed by hand, or crashed. Everything
   // needed was recorded as each request went out, so fall back to that rather

@@ -23,6 +23,19 @@ export function extractServices(responseBody) {
   return out;
 }
 
+/** The serviceBranchID a date body asks about, whether url-encoded or plain. */
+export function serviceIdOf(body) {
+  const text = String(body ?? '');
+  let decoded = text;
+  try {
+    decoded = decodeURIComponent(text);
+  } catch {
+    decoded = text; // a stray % is not a reason to lose the id
+  }
+  const match = decoded.match(/"serviceBranchID"\s*:\s*"([^"]+)"/);
+  return match ? match[1] : null;
+}
+
 /**
  * Rewrite the captured body's serviceBranchID, keeping everything else byte for
  * byte — the payload is form-encoded JSON and re-serialising it risks changing
@@ -86,8 +99,7 @@ export function parseBodiesFile(text) {
   }
 
   return bodies.map((body) => {
-    const m = decodeURIComponent(body).match(/"serviceBranchID"\s*:\s*"([^"]+)"/);
-    const id = m ? m[1] : null;
+    const id = serviceIdOf(body);
     return { body, id, label: (id && labels.get(id)) || null };
   });
 }

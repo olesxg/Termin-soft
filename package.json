@@ -15,7 +15,9 @@
     "wire": "node scripts/wire.js",
     "preflight": "node scripts/preflight.js",
     "hunt": "node scripts/hunt.js",
-    "capture:hold": "node capture-session.js --hold"
+    "capture:hold": "node capture-session.js --hold",
+    "audit": "node scripts/budget-audit.js",
+    "experiment": "node scripts/experiment-report.js"
   },
   "dependencies": {
     "axios": "^1.7.7",

@@ -23,8 +23,9 @@ import { chromium } from 'playwright';
 
 import { str, num, bool } from '../src/config.js';
 import { envLine } from '../src/envwrite.js';
-import { extractServices, bodyForService } from '../src/bodies.js';
+import { extractServices, bodyForService, serviceIdOf } from '../src/bodies.js';
 import { readEnvValues } from '../src/envfile.js';
+import { findServicesStep } from '../src/services-step.js';
 
 const config = {
   startUrl: str('START_URL', 'https://pes.minv.sk/'),
@@ -66,7 +67,13 @@ async function main() {
       // and gating on the host silently ignores everything in a local test.
       try {
         const body = await response.text();
-        captured.push({ url, body });
+        captured.push({
+          url,
+          method: response.request().method(),
+          postData: response.request().postData() ?? '',
+          requestHeaders: await response.request().allHeaders().catch(() => ({})),
+          responseBody: body,
+        });
         if (url.includes(config.dateMarker) && response.status() === 200 && !hit) {
           const request = response.request();
           hit = {
@@ -120,11 +127,15 @@ async function main() {
   const csrf = Object.entries(headers).find(([name]) => /csrf|xsrf/i.test(name));
 
   // Label the one service we are watching, if the services tree was seen.
-  const decoded = decodeURIComponent(hit.postData);
-  const serviceId = (decoded.match(/"serviceBranchID"\s*:\s*"([^"]+)"/) ?? [])[1] ?? null;
-  const services = captured.flatMap((c) => extractServices(c.body));
+  const serviceId = serviceIdOf(hit.postData);
+  const services = captured.flatMap((c) => extractServices(c.responseBody));
   const label = serviceId ? services.find((s) => s.id === serviceId)?.name : null;
   if (label) console.log(`  watching: ${label}`);
+
+  // Hypothesis 1 needs this step replayable; without it SERVICES_REFRESH is a
+  // no-op, and a no-op dressed as an experiment is worse than no experiment.
+  const servicesStep = findServicesStep(captured);
+  console.log(servicesStep ? '  services step recorded' : '  no services step seen — SERVICES_REFRESH cannot be tested');
 
   // A single-service rotation file, so the alert names the service and the
   // cache-buster keeps successive requests from being byte-identical.
@@ -153,6 +164,8 @@ async function main() {
     envLine('ORIGIN', headers.origin ?? new URL(hit.url).origin),
     envLine('USER_AGENT', headers['user-agent'] ?? ''),
     envLine('SLOT_JSON_PATH', 'services'),
+    servicesStep ? envLine('SERVICES_STEP', JSON.stringify(servicesStep)) : '# SERVICES_STEP=',
+    '# SERVICES_REFRESH=true  # replay the step above every few calls (hypothesis 1)',
     '',
     '# Budget is spent after ~6 calls and does not recover, so spread it.',
     envLine('CALL_BUDGET', String(config.callBudget)),

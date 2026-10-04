@@ -68,7 +68,7 @@ export function readIdentity(env = process.env) {
 }
 
 /** Every visible text-ish input on the page, with the label we can see above it. */
-async function collectInputs(page) {
+export async function collectInputs(page) {
   return page.evaluate(() => {
     const SKIP = new Set(['hidden', 'checkbox', 'radio', 'submit', 'button', 'image', 'file']);
 
@@ -122,7 +122,7 @@ async function collectInputs(page) {
 }
 
 /** A locator for an input we already identified, preferring a stable handle. */
-function locatorFor(page, input) {
+export function locatorForInput(page, input) {
   if (input.id) return page.locator(`#${CSS_ESCAPE(input.id)}`);
   if (input.name) return page.locator(`[name="${input.name}"]`);
   return page.locator('input, textarea').nth(input.index);
@@ -209,7 +209,7 @@ export async function fillIdentity(page, identity, options = {}) {
     if (!value) continue;
 
     const override = overrides[field.env];
-    const target = override ? page.locator(override).first() : input ? locatorFor(page, input) : null;
+    const target = override ? page.locator(override).first() : input ? locatorForInput(page, input) : null;
 
     if (!target || (await target.count().catch(() => 0)) === 0) {
       missed.push(field);

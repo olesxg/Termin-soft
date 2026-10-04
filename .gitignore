@@ -23,3 +23,11 @@ sessions*.json
 # Runtime state of a running monitor
 .monitor-status.json
 monitor.log
+
+# Scratch dumps of a captured request (_cp.json and friends) carry the identity
+# payload — name, date of birth, document number, phone, email.
+_cp.json
+_cp*.json
+
+# Hypothesis log written by the monitor: session ages, call counts, verdicts.
+experiment.jsonl
