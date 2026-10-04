@@ -9,8 +9,9 @@ node_modules/
 # The archived form carries the same personal data (name, DOB, document
 # number, phone, SMS PIN), so it must be ignored too.
 captured/
-captured*.zip
-node_modules*.zip
+*.zip
+_cp*.json
+*.jsonl
 screenshots/
 user-data/
 *.log
