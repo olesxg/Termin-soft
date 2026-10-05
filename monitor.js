@@ -191,6 +191,7 @@ const config = {
   // Hypothesis 1 — replay the wizard's services step every N date calls, on the
   // chance that the call counter belongs to the context that step creates. Off
   // by default: an unproven guess must not quietly spend a budget of six.
+  // Whether a replay costs a date call is also unknown — see the function.
   servicesRefresh: bool('SERVICES_REFRESH', false),
   servicesRefreshEvery: num('SERVICES_REFRESH_EVERY', 3),
   // The two steps are one human action, a couple of seconds apart. The pace
@@ -682,7 +683,10 @@ function bury(session, reason) {
 
 /**
  * Replay the services step, then re-point the date body at the ids it returns.
- * Costs one call — the whole bet of hypothesis 1.
+ *
+ * Whether this spends date budget is unmeasured — the step is a different
+ * resource id, and CALL_LIMIT was only ever seen on the date endpoint. The
+ * counts in EXPERIMENT_LOG are what settle it.
  */
 async function refreshServicesContext(session) {
   const step = session.servicesStep;

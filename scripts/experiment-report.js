@@ -12,8 +12,37 @@
  */
 import fs from 'node:fs';
 
-import { str } from '../src/config.js';
+import { str, num } from '../src/config.js';
 import { summarise } from '../src/experiment.js';
+
+const baseline = num('CALL_BUDGET', 6);
+
+/**
+ * Three outcomes, not two. The services step is a different resource id from
+ * the date endpoint (`id=reservation` vs `id=available-offices-service-date`),
+ * and CALL_LIMIT was only ever measured on the second — so whether a refresh
+ * spends date budget is itself unmeasured, and the counts answer it.
+ */
+function refreshVerdict(withRefresh, without, sessions) {
+  if (withRefresh > without * 1.5) {
+    return 'SUPPORTED — the refresh buys calls. Lower SERVICES_REFRESH_EVERY and keep going.';
+  }
+
+  const totals = sessions.map((s) => s.dateCalls + s.refreshes).filter((n) => n > 0);
+  const withSteps = totals.length === 0 ? 0 : totals.reduce((a, b) => a + b, 0) / totals.length;
+
+  if (withRefresh > without) return 'unclear — better, but within noise. More sessions needed.';
+  if (withRefresh < without * 0.9 && withSteps >= without * 0.9) {
+    return (
+      'NOT SUPPORTED, and the refresh SHARES the counter — every replay costs a date call.' +
+      '\n                     Turn SERVICES_REFRESH off; it is spending your budget for nothing.'
+    );
+  }
+  return (
+    'NOT SUPPORTED — the counter is not in the wizard context, but the refresh' +
+    '\n                     did not cost date calls either. Fall back to re-login.'
+  );
+}
 
 const file = process.argv[2] ?? str('EXPERIMENT_LOG', 'experiment.jsonl');
 
@@ -42,6 +71,7 @@ if (rows.length === 0) {
 }
 
 const { sessions, callsWithRefresh, callsWithoutRefresh, deathAges } = summarise(rows);
+const refreshed = sessions.filter((session) => session.refreshes > 0);
 
 console.log(`\n${file} — ${rows.length} rows, ${sessions.length} session(s)\n`);
 console.log('  session            date calls  refreshes  died at  reason');
@@ -56,18 +86,14 @@ for (const session of sessions) {
 console.log('\nHypothesis 1 — does replaying the services step buy more calls?');
 if (callsWithRefresh === null) {
   console.log('  No session has run with SERVICES_REFRESH=true yet. Nothing to compare.');
-} else if (callsWithoutRefresh === null) {
-  console.log(`  With refreshes: ${callsWithRefresh} calls on average. No plain session to compare against.`);
 } else {
   console.log(`  with refreshes   : ${callsWithRefresh} date calls on average`);
-  console.log(`  without          : ${callsWithoutRefresh} date calls on average`);
-  const verdict =
-    callsWithRefresh > callsWithoutRefresh * 1.5
-      ? 'SUPPORTED — the refresh is buying calls. Lower SERVICES_REFRESH_EVERY and keep going.'
-      : callsWithRefresh > callsWithoutRefresh
-        ? 'unclear — better, but within noise. More sessions needed.'
-        : 'NOT SUPPORTED — the counter is not in the wizard context. Fall back to re-login.';
-  console.log(`  verdict          : ${verdict}`);
+  console.log(
+    callsWithoutRefresh === null
+      ? `  without          : no plain session to compare against — using CALL_BUDGET=${baseline}`
+      : `  without          : ${callsWithoutRefresh} date calls on average`,
+  );
+  console.log(`  verdict          : ${refreshVerdict(callsWithRefresh, callsWithoutRefresh ?? baseline, refreshed)}`);
 }
 
 console.log('\nAge at death — is there a second, time-based limit?');
