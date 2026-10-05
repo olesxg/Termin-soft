@@ -166,6 +166,7 @@ function carryOverSettings() {
       // not an experiment, and re-capturing is the routine case here.
       'SERVICES_REFRESH', 'SERVICES_REFRESH_EVERY', 'EXPERIMENT_LOG', 'TIDA_RETRY_VALUES',
       'WATCHDOG_ON_EMPTY_POOL', 'SMS_CODE_VIA_TELEGRAM', 'OFFICE',
+      'PREFER_OFFICE', 'CAPTCHA_WINDOWS', 'CALL_BUDGET', 'BUDGET_WINDOW_MIN', 'PIN_SELECTOR',
       // Losing these would put the six fields back on the human every capture —
       // the exact chore the prefill exists to remove.
       ...IDENTITY_FIELDS.map((f) => f.env),
@@ -196,7 +197,9 @@ function carryOverSettings() {
       refresh: found.SERVICES_REFRESH ?? '', every: found.SERVICES_REFRESH_EVERY ?? '',
       log: found.EXPERIMENT_LOG ?? '', tida: found.TIDA_RETRY_VALUES ?? '',
       watchdog: found.WATCHDOG_ON_EMPTY_POOL ?? '', sms: found.SMS_CODE_VIA_TELEGRAM ?? '',
-      office: found.OFFICE ?? '',
+      office: found.OFFICE ?? '', preferOffice: found.PREFER_OFFICE ?? '',
+      windows: found.CAPTCHA_WINDOWS ?? '', pinSelector: found.PIN_SELECTOR ?? '',
+      budget: found.CALL_BUDGET ?? '', budgetWindow: found.BUDGET_WINDOW_MIN ?? '',
     },
   };
 }
@@ -447,6 +450,18 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
     carried.lab.watchdog ? envLine('WATCHDOG_ON_EMPTY_POOL', carried.lab.watchdog) : '# WATCHDOG_ON_EMPTY_POOL=true',
     carried.lab.sms ? envLine('SMS_CODE_VIA_TELEGRAM', carried.lab.sms) : '# SMS_CODE_VIA_TELEGRAM=true',
     carried.lab.office ? envLine('OFFICE', carried.lab.office) : '# OFFICE=',
+    carried.lab.preferOffice ? envLine('PREFER_OFFICE', carried.lab.preferOffice) : '# PREFER_OFFICE=',
+    carried.lab.pinSelector ? envLine('PIN_SELECTOR', carried.lab.pinSelector) : '# PIN_SELECTOR=',
+    '',
+    '# When you are reachable to tap a CAPTCHA. Unset = asked whenever the pool',
+    '# dies, which has meant half past three.',
+    carried.lab.windows
+      ? envLine('CAPTCHA_WINDOWS', carried.lab.windows)
+      : '# CAPTCHA_WINDOWS=mon-fri 07:00-08:30, mon-fri 18:00-22:00',
+    '',
+    '# Measured: four answers per session, then CALL_LIMIT. Spread them.',
+    carried.lab.budget ? envLine('CALL_BUDGET', carried.lab.budget) : '# CALL_BUDGET=4',
+    carried.lab.budgetWindow ? envLine('BUDGET_WINDOW_MIN', carried.lab.budgetWindow) : '# BUDGET_WINDOW_MIN=60',
     '',
     carried.token ? envLine('TELEGRAM_BOT_TOKEN', carried.token) : '# TELEGRAM_BOT_TOKEN=',
     carried.chatId ? envLine('TELEGRAM_CHAT_ID', carried.chatId) : '# TELEGRAM_CHAT_ID=',

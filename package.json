@@ -17,7 +17,8 @@
     "hunt": "node scripts/hunt.js",
     "capture:hold": "node capture-session.js --hold",
     "audit": "node scripts/budget-audit.js",
-    "experiment": "node scripts/experiment-report.js"
+    "experiment": "node scripts/experiment-report.js",
+    "when": "node scripts/when.js"
   },
   "dependencies": {
     "axios": "^1.7.7",

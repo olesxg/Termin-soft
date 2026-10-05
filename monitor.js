@@ -596,7 +596,8 @@ async function announceSlot(hit, session = null) {
   const offers = formatOffers(hit.sample, { prefer: config.preferOffice });
 
   stopBeeping = await raiseSlotAlarm([
-    service,
+    // An alarm is read in seconds; a line saying "(unnamed)" is only clutter.
+    ...(service === '(unnamed)' ? [] : [service]),
     ...(offers.length > 0 ? offers : [hit.sample ? `dates: ${hit.sample}` : 'open the portal tab and click through NOW']),
     // A clean, tappable link — never the giant session-bound portlet URL, which
     // cannot be opened from a phone.
