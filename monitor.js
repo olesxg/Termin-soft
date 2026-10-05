@@ -27,6 +27,8 @@ import { writeStatus, readStatus } from './src/status.js';
 import { mirrorConsoleTo } from './src/logfile.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 import { firstOffer, prepareBooking, openSessionBrowser } from './src/booking.js';
+import { formatOffers } from './src/offers.js';
+import { parseWindows, inWindow, nextWindowStart, weeklyMinutes } from './src/windows.js';
 import { readIdentity, fillIdentity, enterWizard, IDENTITY_FIELDS } from './src/identity.js';
 import { dueForRefresh, refreshedBody, serviceLabel } from './src/services-step.js';
 import { record, withTabId, nextTabId, markTabId } from './src/experiment.js';
@@ -187,6 +189,9 @@ const config = {
 
   onlyService: str('ONLY_SERVICE'),
   office: str('OFFICE'),
+  // Starred and listed first in the alert. Never filters: a slot anywhere beats
+  // no slot, and the alarm must not stay silent because it was in the wrong town.
+  preferOffice: str('PREFER_OFFICE', str('OFFICE')),
   dateMarker: str('DATE_ENDPOINT_MARKER', 'available-offices-service-date'),
 
   // Hypothesis 1 — DISPROVEN 2026-10-05, kept so the measurement can be redone
@@ -212,7 +217,15 @@ const config = {
   watchdog: bool('WATCHDOG_ON_EMPTY_POOL', true),
   watchdogPollMs: num('WATCHDOG_POLL_MS', 30_000),
   smsViaTelegram: bool('SMS_CODE_VIA_TELEGRAM', false),
+  // When a human is reachable to tap a CAPTCHA. Unset = ask whenever the pool
+  // empties, which is how the watchdog came to ask at half past three.
+  captchaWindows: str('CAPTCHA_WINDOWS'),
 };
+
+const { windows: captchaWindows, bad: badWindows } = parseWindows(config.captchaWindows);
+for (const entry of badWindows) {
+  console.warn(`  ignoring CAPTCHA_WINDOWS entry "${entry}" — expected e.g. "mon-fri 18:00-22:00"`);
+}
 
 /**
  * Sessions to rotate over.
@@ -577,10 +590,14 @@ async function announceSlot(hit, session = null) {
   if (stopBeeping) stopBeeping();
   clearTimeout(beepDeadline);
 
+  // Read on a phone, in seconds, by someone who then has to race for it. The
+  // raw answer is a wall of JSON with branchPublicId in it; city, date and how
+  // soon are what decide whether to drop everything and run.
+  const offers = formatOffers(hit.sample, { prefer: config.preferOffice });
+
   stopBeeping = await raiseSlotAlarm([
-    `service: ${service}`,
-    `reason: ${hit.reason}`,
-    hit.sample ? `dates : ${hit.sample}` : 'open the portal tab and click through NOW',
+    service,
+    ...(offers.length > 0 ? offers : [hit.sample ? `dates: ${hit.sample}` : 'open the portal tab and click through NOW']),
     // A clean, tappable link — never the giant session-bound portlet URL, which
     // cannot be opened from a phone.
     `👉 ${config.bookUrl}`,
@@ -1054,6 +1071,41 @@ async function watchdogRelogin() {
   }
 }
 
+/** A session from disk, if one appeared since the last look. */
+function adoptFromDisk() {
+  const fromFile = freshSessions(parseSessions(readSessionsFile(config.sessionsFile)).sessions, IDLE_DEATH_MIN);
+  const { merged, added } = mergeSessions(sessions, fromFile);
+  if (added.length === 0) return null;
+
+  sessions = merged;
+  usingSessionsFile = true;
+  sessionCursor = -1;
+  return added;
+}
+
+/**
+ * Sit out the hours nobody can answer in.
+ *
+ * @returns {Promise<boolean>} true when a session turned up meanwhile — someone
+ *   ran a capture by hand, and there is nothing left to ask for.
+ */
+async function waitForWindowOrSession() {
+  while (running) {
+    await new Promise((resolve) => setTimeout(resolve, config.watchdogPollMs));
+
+    const added = adoptFromDisk();
+    if (added) {
+      console.log(`\n[${ts()}] adopted ${added.map((s) => s.label).join(', ')} — polling resumes.`);
+      return true;
+    }
+    if (inWindow(new Date(), captchaWindows)) {
+      console.log(`\n[${ts()}] CAPTCHA window is open — asking now.`);
+      return false;
+    }
+  }
+  return false;
+}
+
 /**
  * The passive half of the watchdog: `npm run capture` in another window is
  * still the most reliable way to make a session, and the monitor has to be the
@@ -1068,13 +1120,9 @@ async function waitForFreshSession() {
   while (running) {
     await new Promise((resolve) => setTimeout(resolve, config.watchdogPollMs));
 
-    const fromFile = freshSessions(parseSessions(readSessionsFile(config.sessionsFile)).sessions, IDLE_DEATH_MIN);
-    const { merged, added } = mergeSessions(sessions, fromFile);
-    if (added.length === 0) continue;
+    const added = adoptFromDisk();
+    if (!added) continue;
 
-    sessions = merged;
-    usingSessionsFile = true;
-    sessionCursor = -1;
     console.log(`\n[${ts()}] adopted ${added.map((s) => s.label).join(', ')} — polling resumes.`);
     await notifyTelegram('✅ Monitor pokračuje — nová sesia je v poole.');
     return;
@@ -1101,6 +1149,19 @@ async function handleEmptyPool() {
 
   console.warn(`\n[${ts()}] pool is empty — the watchdog takes over instead of exiting.`);
   writeStatus({ lastResult: 'pool-empty', lastReason: death.push, poolEmptyAt: new Date().toISOString() });
+
+  // One CAPTCHA buys one hour of watching, so it is only worth asking for while
+  // someone is awake to give it — and the hour it buys should be an hour worth
+  // watching. Outside the windows the monitor waits in silence.
+  if (!inWindow(new Date(), captchaWindows)) {
+    const opens = nextWindowStart(new Date(), captchaWindows);
+    console.warn(
+      `[${ts()}] outside the CAPTCHA windows — staying quiet until ` +
+        `${opens ? opens.toLocaleString('sk-SK', { hour12: false }) : 'the next one'}.`,
+    );
+    if (await waitForWindowOrSession()) return;
+  }
+
   await notifyTelegram(`${death.push}\n\nPotrebná CAPTCHA + SMS. Monitor nebeží naprázdno — čaká na novú sesiu.`);
 
   if (await watchdogRelogin()) {
@@ -1170,6 +1231,11 @@ async function loop() {
   }
   if (config.experimentLog) console.log(`  log      : ${config.experimentLog} (npm run experiment)`);
   console.log(`  on empty : ${config.watchdog ? 'open a window, ask for the CAPTCHA, keep watching' : 'exit'}`);
+  if (config.watchdog && captchaWindows.length > 0) {
+    const hours = Math.round(weeklyMinutes(captchaWindows) / 60);
+    console.log(`  asks in  : ${captchaWindows.map((w) => w.label).join(' | ')}`);
+    console.log(`             ${hours}h a week to be asked in — at ~1h watched per CAPTCHA, that is the ceiling`);
+  }
   if (config.budgetWindowMin > 0) {
     console.log(`  budget   : ~${config.callBudget} calls spread over ${config.budgetWindowMin} min`);
   }
