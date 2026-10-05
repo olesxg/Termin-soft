@@ -304,7 +304,7 @@ async function appendSession(best, cookieHeader, userAgent, body) {
     }),
   );
 
-  console.log(`\n${file}: pool is now ${size} session(s) — roughly ${size * 5} calls.`);
+  console.log(`\n${file}: pool is now ${size} session(s) — roughly ${size * 4} calls.`);
   console.log(
     servicesStep
       ? '  services step recorded — SERVICES_REFRESH=true can replay it (hypothesis 1).'

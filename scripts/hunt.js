@@ -11,8 +11,8 @@
  * The moment the portal answers the date endpoint, this captures that exact
  * request, writes .env, closes the browser and starts the monitor itself — no
  * pressing ENTER at the right instant, no copying files. Then you put the phone
- * away; Telegram tells you if a slot opens or when the ~6-call budget is spent
- * and a fresh CAPTCHA + SMS is needed.
+ * away; Telegram tells you if a slot opens or when the four-answer budget is
+ * spent and a fresh CAPTCHA + SMS is needed.
  *
  *   npm run hunt
  */
@@ -35,8 +35,8 @@ const config = {
   dateMarker: str('DATE_ENDPOINT_MARKER', 'available-offices-service-date'),
   authTimeoutMin: num('AUTH_TIMEOUT_MIN', 20),
   // Spread the scarce budget across an hour by default, so one manual auth
-  // covers a long window unattended rather than burning out in six minutes.
-  callBudget: num('CALL_BUDGET', 6),
+  // covers a long window unattended rather than burning out in four minutes.
+  callBudget: num('CALL_BUDGET', 4),
   budgetWindowMin: num('BUDGET_WINDOW_MIN', 60),
 };
 
@@ -167,7 +167,7 @@ async function main() {
     servicesStep ? envLine('SERVICES_STEP', JSON.stringify(servicesStep)) : '# SERVICES_STEP=',
     '# SERVICES_REFRESH=true  # replay the step above every few calls (hypothesis 1)',
     '',
-    '# Budget is spent after ~6 calls and does not recover, so spread it.',
+    '# Budget is four answers, measured, and does not recover — so spread it.',
     envLine('CALL_BUDGET', String(config.callBudget)),
     envLine('BUDGET_WINDOW_MIN', String(config.budgetWindowMin)),
     '',

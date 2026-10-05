@@ -2,9 +2,15 @@ import { extractServices, bodyForService, matchServices, serviceIdOf } from './b
 import { isThirdPartyHost } from './hosts.js';
 
 /**
- * Hypothesis 1: the date endpoint's call counter lives in the context the
- * wizard's services step creates, so replaying that step buys a fresh budget.
- * Unproven — see README, "Що ще не перевірено щодо бюджету".
+ * Hypothesis 1, DISPROVEN 2026-10-05: the date endpoint's call counter does NOT
+ * live in the context the services step creates.
+ *
+ * The replay works — it hands out a genuinely new serviceBranchID, so the
+ * server really does build a fresh context — and the counter ignores it. Three
+ * sessions, four answers each, with and without. The counter is per session.
+ *
+ * Kept so the measurement can be repeated if the portal changes, and so the
+ * next person reads a result instead of re-deriving the guess.
  */
 
 /**

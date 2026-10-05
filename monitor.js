@@ -137,11 +137,12 @@ const config = {
   extraHeaders: json('EXTRA_HEADERS', {}),
 
   intervalMs: num('INTERVAL_MS', 60_000),
-  // Measured: a session is cut off after roughly six calls to this endpoint, and
-  // neither slower polling, varied payloads, unique URLs nor waiting out
-  // CALL_LIMIT restores it. The calls are the scarce resource, not time — so
-  // spread them across a window instead of spending them in six minutes.
-  callBudget: num('CALL_BUDGET', 6),
+  // Measured 2026-10-05 across three sessions: FOUR answers, then the fifth
+  // call returns CALL_LIMIT. Identical whether or not the wizard context was
+  // rebuilt in between. Neither slower polling, varied payloads, unique URLs
+  // nor waiting it out restores the budget — the calls are the scarce
+  // resource, not time, so spread them over the window you actually care about.
+  callBudget: num('CALL_BUDGET', 4),
   budgetWindowMin: num('BUDGET_WINDOW_MIN', 0),
   jitterMs: num('JITTER_MS', 15_000),
   // The portal answers slowly when it is struggling: third-party fetches of the
@@ -188,10 +189,12 @@ const config = {
   office: str('OFFICE'),
   dateMarker: str('DATE_ENDPOINT_MARKER', 'available-offices-service-date'),
 
-  // Hypothesis 1 — replay the wizard's services step every N date calls, on the
-  // chance that the call counter belongs to the context that step creates. Off
-  // by default: an unproven guess must not quietly spend a budget of six.
-  // Whether a replay costs a date call is also unknown — see the function.
+  // Hypothesis 1 — DISPROVEN 2026-10-05, kept so the measurement can be redone
+  // rather than re-guessed. Replaying the services step hands out a genuinely
+  // new serviceBranchID, so the server does build a fresh wizard context there
+  // — and the date counter survives it untouched: 4 answers with a refresh,
+  // 4 without. The counter belongs to the session, not to the context. The
+  // replay costs no date budget either, so leaving it on is merely pointless.
   servicesRefresh: bool('SERVICES_REFRESH', false),
   servicesRefreshEvery: num('SERVICES_REFRESH_EVERY', 3),
   // The two steps are one human action, a couple of seconds apart. The pace
@@ -250,7 +253,7 @@ function loadSessions() {
     // Enforced here, not only at capture time. The body lives on the session, so
     // a pool built before ONLY_SERVICE was set — or topped up from an older
     // file — keeps asking about services you never wanted, and every one of
-    // those spends a call from a budget of roughly five per session.
+    // those spends a call from a budget of four per session.
     const only = config.onlyService;
     let usable = fresh;
     if (only) {
@@ -1128,7 +1131,7 @@ async function loop() {
     console.log(`  interval : ${config.intervalMs / 1000}s (+ up to ${config.jitterMs / 1000}s jitter)`);
   }
   if (sessions.length > 1) {
-    console.log(`  sessions : ${sessions.length} in rotation — roughly ${sessions.length * 5} calls`);
+    console.log(`  sessions : ${sessions.length} in rotation — roughly ${sessions.length * 4} calls`);
 
     // A session's turn comes round once per lap, and it dies if the lap is
     // longer than it can idle. Measured 2026-08-28: sessions first touched
