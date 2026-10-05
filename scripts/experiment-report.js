@@ -96,18 +96,53 @@ if (callsWithRefresh === null) {
   console.log(`  verdict          : ${refreshVerdict(callsWithRefresh, callsWithoutRefresh ?? baseline, refreshed)}`);
 }
 
-console.log('\nAge at death — is there a second, time-based limit?');
+/**
+ * The question that decides whether this can run unattended at all.
+ *
+ * Measured 2026-09-03: three sessions captured within three minutes of each
+ * other all answered {} between their 62nd and 65th minute. {} means the wizard
+ * context was dropped — the same thing hypothesis 1 says the services step
+ * builds. So if replaying that step rebuilds the context, it may restart the
+ * hour as well as the call counter, and one CAPTCHA would cover a morning
+ * rather than an hour. Split by refreshes, the ages answer it.
+ */
+console.log('\nAge at death — can a session outlive the ~65 minute ceiling?');
+
+/**
+ * A session that died of CALL_LIMIT at 14 minutes says nothing about the hour:
+ * it never got near it. Only a session that ran long enough to meet the ceiling
+ * can confirm or break it, so anything shorter counts as untested.
+ */
+const CEILING_MIN = 50;
+const aged = (list) =>
+  list
+    .filter((session) => session.ageAtDeathMin !== null)
+    .sort((a, b) => a.ageAtDeathMin - b.ageAtDeathMin);
+const show = (list) =>
+  list.map((s) => `${s.ageAtDeathMin}min (${/expired/i.test(s.reason ?? '') ? 'age' : 'calls'})`).join(', ');
+
+const plain = aged(sessions.filter((session) => session.refreshes === 0));
+const kept = aged(refreshed);
+const oldestKept = kept.length === 0 ? null : kept[kept.length - 1].ageAtDeathMin;
+
 if (deathAges.length === 0) {
   console.log('  No session has died with a known capture time yet.');
 } else {
-  const sorted = [...deathAges].sort((a, b) => a - b);
-  console.log(`  ${sorted.join(', ')} minutes (${sorted.length} session(s))`);
-  const aged = sorted.filter((age) => age >= 55 && age <= 75).length;
-  console.log(
-    aged >= 2
-      ? `  ${aged} of them died in the 55-75min window — consistent with a session that expires by age.`
-      : '  No cluster around an hour yet. Keep sessions alive longer to tell age from calls.',
-  );
+  if (plain.length > 0) console.log(`  without refreshes: ${show(plain)}`);
+  if (kept.length > 0) console.log(`  with refreshes   : ${show(kept)}`);
+
+  if (oldestKept === null) {
+    console.log('  Nothing has run with SERVICES_REFRESH=true — the ceiling is untested.');
+  } else if (oldestKept > 80) {
+    console.log(`  A refreshed session reached ${oldestKept} min — the hour ceiling is NOT fixed.`);
+    console.log('  This is the result that makes unattended running possible. Keep going.');
+  } else if (oldestKept >= CEILING_MIN) {
+    console.log(`  Refreshed sessions still die by ${oldestKept} min — the hour is a hard ceiling.`);
+    console.log('  One CAPTCHA buys one hour, whatever else is done. Plan around that.');
+  } else {
+    console.log(`  The longest refreshed session only reached ${oldestKept} min — it died of calls,`);
+    console.log(`  not of age, so the ceiling is still untested. Keep one alive past ${CEILING_MIN} min.`);
+  }
 }
 
 console.log('');
