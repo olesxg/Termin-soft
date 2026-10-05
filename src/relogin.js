@@ -1,8 +1,12 @@
+import path from 'node:path';
+
 import { extractServices } from './bodies.js';
 import { readIdentity, fillIdentity, enterWizard, IDENTITY_FIELDS } from './identity.js';
 import { sessionRecord } from './sessionfile.js';
 import { findServicesStep } from './services-step.js';
-import { choose, chooseOffice, clickContinue, fillPin, passCaptcha, waitForDateStep, waitForPinInput } from './wizard.js';
+import {
+  choose, chooseOffice, clickContinue, fillPin, passCaptcha, waitForDateStep, waitForPinAccepted, waitForPinInput,
+} from './wizard.js';
 
 /**
  * A fresh login, driven as far as a machine honestly can: everything but the
@@ -58,9 +62,30 @@ function watchRequests(page, dateMarker) {
   return { entries, dateRequest };
 }
 
+/**
+ * Save the page a step could not be found on.
+ *
+ * Every selector here was derived from one captured date step, and the first
+ * live run already disproved one of them. A dump turns the next wrong guess
+ * into a one-line fix instead of another lost SMS.
+ *
+ * Holds the prefilled identity, so it goes to the gitignored capture dir.
+ */
+async function dumpPage(page, { fs, dumpDir, log }, tag) {
+  if (!fs || !dumpDir) return;
+  try {
+    fs.mkdirSync(dumpDir, { recursive: true });
+    const file = path.join(dumpDir, `relogin-${tag}-${Date.now()}.html`);
+    fs.writeFileSync(file, await page.content(), 'utf8');
+    log(`saved the page for diagnosis -> ${file}`);
+  } catch (err) {
+    log(`could not save the page: ${err.message}`);
+  }
+}
+
 /** Never throws: every failure is reported and the window is left to a human. */
 async function automate(page, options) {
-  const { identity, service, office, readCode, notify, log, timeouts, overrides } = options;
+  const { identity, service, office, readCode, notify, log, timeouts, overrides, pinSelector } = options;
 
   if (Object.keys(identity).length > 0) {
     if (await enterWizard(page).catch(() => false)) log('opened the form');
@@ -70,30 +95,54 @@ async function automate(page, options) {
     log(`no ID_* values set — fill the form by hand (${IDENTITY_FIELDS.map((f) => f.env).join(', ')})`);
   }
 
-  await notify('🔐 Potrebná CAPTCHA — monitor otvoril okno a čaká. Solve it, the rest is automatic.');
+  await notify(
+    '🔐 Potrebná CAPTCHA. Anketa je vyplnená — vyrieš CAPTCHA v okne, ďalej to ide samo.\n' +
+      'SMS prijde až po nej, takže kým o kód nepoprosím, žiadny nečakaj.',
+  );
 
   const captcha = await passCaptcha(page, { timeoutMs: timeouts.captchaMs }).catch(() => 'timeout');
   log(`captcha: ${captcha}`);
-  if (captcha === 'timeout') return;
+  if (captcha === 'timeout') {
+    log('CAPTCHA not solved in time — the window is yours');
+    return;
+  }
 
+  // Only now can an SMS exist: the identity step has been accepted and the
+  // portal has rendered the field it wants the code in. Asking any earlier is
+  // asking for a code that was never sent.
   if (!(await waitForPinInput(page, { timeoutMs: timeouts.pinMs }))) {
-    log('no SMS field appeared — finish this step in the window');
+    log('no SMS field appeared — the identity step was not accepted. Finish it in the window');
+    await notify('⚠️ SMS sa neodoslala — anketu treba dokončiť v okne. Monitor ďalej čaká na sesiu.');
+    await dumpPage(page, options, 'no-pin-field');
     return;
   }
 
   const code = readCode ? await readCode() : null;
   if (code) {
-    const typed = await fillPin(page, code).catch((err) => ({ ok: false, reason: err.message }));
+    const typed = await fillPin(page, code, { override: pinSelector }).catch((err) => ({ ok: false, reason: err.message }));
     log(typed.ok ? 'SMS code typed and submitted' : `could not type the code: ${typed.reason}`);
   } else {
-    await notify('📲 Napíš kód zo SMS sem do chatu (alebo ho zadaj priamo v okne).');
+    await notify(
+      readCode
+        ? '📲 Kód do chatu neprišiel — zadaj ho priamo v okne.'
+        : '📲 SMS odoslaná. Zadaj kód priamo v okne.\n' +
+            '(SMS_CODE_VIA_TELEGRAM=true a budem ho čítať z tohto chatu.)',
+    );
     log('waiting for the code to be typed in the window');
+  }
+
+  // The service list does not exist until the code is accepted, so picking now
+  // would match whatever prose on the PIN page happens to name the service.
+  if (!(await waitForPinAccepted(page, { timeoutMs: timeouts.pinMs }))) {
+    log('still on the code step — the window is yours');
+    return;
   }
 
   if (service) {
     const picked = await choose(page, service, { timeoutMs: timeouts.stepMs }).catch((err) => ({ ok: false, reason: err.message }));
     log(picked.ok ? `service: ${picked.label}` : `service not picked: ${picked.reason}`);
     if (picked.ok) await clickContinue(page).catch(() => false);
+    else await dumpPage(page, options, 'service-not-found');
   }
 
   if (await waitForDateStep(page, { timeoutMs: timeouts.stepMs })) {
@@ -101,6 +150,7 @@ async function automate(page, options) {
     if (office) {
       const picked = await chooseOffice(page, office).catch((err) => ({ ok: false, reason: err.message }));
       log(picked.ok ? `office: ${picked.label}` : `office not picked: ${picked.reason}`);
+      if (!picked.ok) await dumpPage(page, options, 'office-not-found');
     }
   }
 }
@@ -120,7 +170,10 @@ export async function relogin(options = {}) {
     notify = async () => {},
     log = () => {},
     overrides = {},
+    pinSelector = '',
     poolIndex = 1,
+    fs = null,
+    dumpDir = '',
     ...rest
   } = options;
 
@@ -139,9 +192,9 @@ export async function relogin(options = {}) {
   const { entries, dateRequest } = watchRequests(page, timeouts.dateMarker);
   await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
 
-  automate(page, { identity, service, office, readCode, notify, log, timeouts, overrides }).catch((err) =>
-    log(`automation stopped: ${err.message}`),
-  );
+  automate(page, {
+    identity, service, office, readCode, notify, log, timeouts, overrides, pinSelector, fs, dumpDir,
+  }).catch((err) => log(`automation stopped: ${err.message}`));
 
   const timedOut = Symbol('timed-out');
   const hit = await Promise.race([

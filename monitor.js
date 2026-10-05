@@ -1016,7 +1016,10 @@ async function watchdogRelogin() {
       office: config.office,
       dateMarker: config.dateMarker,
       overrides: identityOverrides(),
+      pinSelector: str('PIN_SELECTOR'),
       poolIndex: readSessionsFile(config.sessionsFile).length + 1,
+      fs,
+      dumpDir: str('CAPTURE_DIR', 'captured'),
       readCode: config.smsViaTelegram
         ? () =>
             awaitCode({

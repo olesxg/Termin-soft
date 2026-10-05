@@ -1,5 +1,5 @@
 import { normalize } from './detect.js';
-import { collectInputs, locatorForInput } from './identity.js';
+import { collectInputs, locatorForInput, matchFields } from './identity.js';
 
 /**
  * The mechanical steps around the SMS code: type the PIN, pick the service,
@@ -10,7 +10,8 @@ import { collectInputs, locatorForInput } from './identity.js';
  */
 
 const CONTINUE = /Pokra[čc]ova[ťt]/i;
-const PIN_LABELS = ['kod z sms', 'sms kod', 'pin', 'kod'];
+const PIN_LABELS = ['kod z sms', 'sms kod', 'overovaci kod', 'autorizacny kod', 'pin kod', 'pin', 'kod'];
+const PIN_INPUT_TYPES = new Set(['text', 'tel', 'number', 'password']);
 const CAPTCHA_TOKEN = 'textarea[name="g-recaptcha-response"]';
 
 export const WIZARD_SELECTORS = {
@@ -108,16 +109,41 @@ export async function captchaToken(page) {
 }
 
 /**
- * Found by label, most specific first. No identity label contains "kod" or
- * "pin" — "Číslo cestovného dokladu" included — so the broad fallback is safe.
+ * The SMS field, or null while step 1 is still on screen.
+ *
+ * The label gate alone is not enough and claiming the field early is the worst
+ * outcome there is: measured 2026-10-05, a label taken from step 1's own
+ * explanatory text ("bude zaslaný PIN kód") matched "pin", so the CAPTCHA was
+ * never waited for, the identity step was never submitted, and the watchdog
+ * asked for a code from an SMS the portal had never sent.
+ *
+ * So the step is identified by state, not by wording: the identity form must be
+ * gone before any label is believed. When in doubt this returns null, because
+ * waiting costs nothing while a false positive skips the whole SMS.
  */
-export async function findPinInput(page) {
-  const inputs = await collectInputs(page).catch(() => []);
+export function pickPinInput(inputs) {
+  const fields = inputs ?? [];
+  const identityFields = matchFields(fields).filter((pair) => pair.input).length;
+  if (identityFields >= 2) return null;
+
   for (const needle of PIN_LABELS) {
-    const match = bestMatch(inputs, needle);
+    const match = bestMatch(fields, needle);
     if (match) return match;
   }
-  return null;
+
+  // Unlabelled, but the code step has one box and nothing else to confuse it.
+  if (identityFields > 0) return null;
+  const boxes = fields.filter((input) => PIN_INPUT_TYPES.has(input.type));
+  return boxes.length === 1 ? boxes[0] : null;
+}
+
+export async function findPinInput(page) {
+  return pickPinInput(await collectInputs(page).catch(() => []));
+}
+
+/** True while the code step is still waiting to be filled. */
+export async function pinStillPending(page) {
+  return Boolean(await findPinInput(page));
 }
 
 /**
@@ -150,6 +176,22 @@ export async function waitForPinInput(page, { timeoutMs = 5 * 60_000, pollMs = 2
     const input = await findPinInput(page);
     if (input) return input;
     if (Date.now() >= deadline) return null;
+    await page.waitForTimeout(pollMs);
+  }
+}
+
+/**
+ * Wait until the code step is behind us.
+ *
+ * Picking a service while the PIN is still on screen is how a stray click lands
+ * on the wrong page: the service list does not exist yet, so `choose` matches
+ * whatever prose mentions it.
+ */
+export async function waitForPinAccepted(page, { timeoutMs = 3 * 60_000, pollMs = 2000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!(await pinStillPending(page))) return true;
+    if (Date.now() >= deadline) return false;
     await page.waitForTimeout(pollMs);
   }
 }
