@@ -112,3 +112,59 @@ test('the delay is positive and matches the instant', () => {
   const now = new Date('2026-10-07T14:00:00');
   assert.equal(waveDelayMs(now, times, 0), 45 * 60_000);
 });
+
+import { waveMinutes } from '../src/schedule.js';
+import { parseDayList } from '../src/windows.js';
+
+test('one known wave fixes the phase of the whole grid', () => {
+  const { times } = parseWaveTimes('14:45');
+  const minutes = waveMinutes(times, 20);
+  assert.equal(minutes.length, 72, '20-minute grid = 72 waves a day');
+  assert.equal(minutes.includes(14 * 60 + 45), true);
+  assert.equal(minutes.includes(14 * 60 + 25), true);
+  assert.equal(minutes.includes(15 * 60 + 5), true);
+  assert.equal(minutes.includes(14 * 60 + 50), false, ':50 is off the grid');
+});
+
+test('without an interval the times are taken literally', () => {
+  const { times } = parseWaveTimes('14:45, 22:40');
+  assert.deepEqual(waveMinutes(times, 0), [22 * 60 + 40, 14 * 60 + 45].sort((a, b) => a - b));
+});
+
+test('the grid walks forward wave by wave', () => {
+  const { times } = parseWaveTimes('14:45');
+  const opts = { everyMin: 20 };
+  const first = nextWaveTime(new Date('2026-10-07T14:30:00'), times, 0, opts);
+  assert.equal(first.getHours(), 14);
+  assert.equal(first.getMinutes(), 45);
+
+  const second = nextWaveTime(new Date('2026-10-07T14:46:00'), times, 0, opts);
+  assert.equal(second.getMinutes(), 5);
+  assert.equal(second.getHours(), 15);
+});
+
+test('a release that only runs on Wednesdays skips the rest of the week', () => {
+  const { times } = parseWaveTimes('14:45');
+  const opts = { everyMin: 20, days: parseDayList('wed') };
+
+  // Thursday 2026-10-08 -> the next release is Wednesday 2026-10-14.
+  const at = nextWaveTime(new Date('2026-10-08T09:00:00'), times, 0, opts);
+  assert.equal(at.getDay(), 3);
+  assert.equal(at.getDate(), 14);
+  assert.equal(at.getHours(), 0, 'the first wave of that day, not the anchor hour');
+  assert.equal(at.getMinutes(), 5);
+});
+
+test('on the release day itself the next wave is minutes away, not days', () => {
+  const { times } = parseWaveTimes('14:45');
+  const at = nextWaveTime(new Date('2026-10-07T14:30:00'), times, 0, { everyMin: 20, days: parseDayList('wed') });
+  assert.equal(at.getDate(), 7);
+  assert.equal(at.getMinutes(), 45);
+});
+
+test('the lead applies to the grid too', () => {
+  const { times } = parseWaveTimes('14:45');
+  const at = nextWaveTime(new Date('2026-10-07T14:30:00'), times, 10_000, { everyMin: 20 });
+  assert.equal(at.getMinutes(), 44);
+  assert.equal(at.getSeconds(), 50);
+});

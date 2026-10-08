@@ -89,21 +89,48 @@ export function parseWaveTimes(text) {
 }
 
 /**
+ * Every minute of the day a wave lands on.
+ *
+ * With `everyMin` the given times are not the whole list, they fix the PHASE
+ * of a repeating grid: 14:45 on a 20-minute grid means :05, :25 and :45 past
+ * every hour. One known wave is therefore enough to derive all of them.
+ */
+export function waveMinutes(times, everyMin = 0) {
+  if (!Array.isArray(times) || times.length === 0) return [];
+
+  const exact = times.map(({ hour, minute }) => hour * 60 + minute);
+  if (!Number.isFinite(everyMin) || everyMin <= 0) return [...new Set(exact)].sort((a, b) => a - b);
+
+  const phases = new Set(exact.map((minute) => minute % everyMin));
+  const all = [];
+  for (let minute = 0; minute < 24 * 60; minute += 1) {
+    if (phases.has(minute % everyMin)) all.push(minute);
+  }
+  return all;
+}
+
+/**
  * When to fire the first call of the next wave.
  *
- * `leadMs` before it, so the burst straddles the release rather than starting
+ * `leadMs` before it, so the call straddles the release rather than landing
  * after it — the slots caught are the ones seen in the first seconds.
+ *
+ * @param {Set<number>|null} days weekdays the release runs on, null for all
  */
-export function nextWaveTime(now, times, leadMs = 0) {
-  if (!Array.isArray(times) || times.length === 0) return null;
+export function nextWaveTime(now, times, leadMs = 0, { everyMin = 0, days = null } = {}) {
+  const minutes = waveMinutes(times, everyMin);
+  if (minutes.length === 0) return null;
 
-  for (let ahead = 0; ahead <= 1; ahead += 1) {
+  const second = times[0]?.second ?? 0;
+
+  for (let ahead = 0; ahead <= 7; ahead += 1) {
     const day = new Date(now.getTime());
     day.setDate(day.getDate() + ahead);
+    if (days !== null && !days.has(day.getDay())) continue;
 
-    for (const { hour, minute, second } of times) {
+    for (const minute of minutes) {
       const at = new Date(day.getTime());
-      at.setHours(hour, minute, second, 0);
+      at.setHours(Math.floor(minute / 60), minute % 60, second, 0);
       const fire = new Date(at.getTime() - leadMs);
       if (fire.getTime() > now.getTime()) return fire;
     }
@@ -112,7 +139,7 @@ export function nextWaveTime(now, times, leadMs = 0) {
 }
 
 /** Milliseconds until the next wave's first call; null when no waves are set. */
-export function waveDelayMs(now, times, leadMs = 0) {
-  const at = nextWaveTime(now, times, leadMs);
+export function waveDelayMs(now, times, leadMs = 0, options = {}) {
+  const at = nextWaveTime(now, times, leadMs, options);
   return at === null ? null : at.getTime() - now.getTime();
 }

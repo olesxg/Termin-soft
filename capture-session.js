@@ -167,7 +167,7 @@ function carryOverSettings() {
       'SERVICES_REFRESH', 'SERVICES_REFRESH_EVERY', 'EXPERIMENT_LOG', 'TIDA_RETRY_VALUES',
       'WATCHDOG_ON_EMPTY_POOL', 'SMS_CODE_VIA_TELEGRAM', 'OFFICE',
       'PREFER_OFFICE', 'CAPTCHA_WINDOWS', 'CALL_BUDGET', 'BUDGET_WINDOW_MIN', 'PIN_SELECTOR',
-      'WAVE_TIMES', 'WAVE_LEAD_MS', 'WAVE_BURST',
+      'WAVE_TIMES', 'WAVE_LEAD_MS', 'WAVE_BURST', 'WAVE_EVERY_MIN', 'WAVE_DAYS',
       // Losing these would put the six fields back on the human every capture —
       // the exact chore the prefill exists to remove.
       ...IDENTITY_FIELDS.map((f) => f.env),
@@ -202,6 +202,7 @@ function carryOverSettings() {
       windows: found.CAPTCHA_WINDOWS ?? '', pinSelector: found.PIN_SELECTOR ?? '',
       budget: found.CALL_BUDGET ?? '', budgetWindow: found.BUDGET_WINDOW_MIN ?? '',
       waves: found.WAVE_TIMES ?? '', waveLead: found.WAVE_LEAD_MS ?? '', waveBurst: found.WAVE_BURST ?? '',
+      waveEvery: found.WAVE_EVERY_MIN ?? '', waveDays: found.WAVE_DAYS ?? '',
     },
   };
 }
@@ -467,9 +468,11 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
     '',
     '# Release waves: the portal publishes in batches at a clock time, and all',
     '# four calls are worth holding for one. Beats every other scheduling knob.',
-    carried.lab.waves ? envLine('WAVE_TIMES', carried.lab.waves) : '# WAVE_TIMES=14:45, 22:40',
+    carried.lab.waves ? envLine('WAVE_TIMES', carried.lab.waves) : '# WAVE_TIMES=14:45',
+    carried.lab.waveEvery ? envLine('WAVE_EVERY_MIN', carried.lab.waveEvery) : '# WAVE_EVERY_MIN=20',
+    carried.lab.waveDays ? envLine('WAVE_DAYS', carried.lab.waveDays) : '# WAVE_DAYS=wed',
     carried.lab.waveLead ? envLine('WAVE_LEAD_MS', carried.lab.waveLead) : '# WAVE_LEAD_MS=10000',
-    carried.lab.waveBurst ? envLine('WAVE_BURST', carried.lab.waveBurst) : '# WAVE_BURST=4',
+    carried.lab.waveBurst ? envLine('WAVE_BURST', carried.lab.waveBurst) : '# WAVE_BURST=1',
     '',
     carried.token ? envLine('TELEGRAM_BOT_TOKEN', carried.token) : '# TELEGRAM_BOT_TOKEN=',
     carried.chatId ? envLine('TELEGRAM_CHAT_ID', carried.chatId) : '# TELEGRAM_CHAT_ID=',

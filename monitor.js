@@ -28,7 +28,7 @@ import { mirrorConsoleTo } from './src/logfile.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 import { firstOffer, prepareBooking, openSessionBrowser } from './src/booking.js';
 import { formatOffers } from './src/offers.js';
-import { parseWindows, inWindow, nextWindowStart, weeklyMinutes } from './src/windows.js';
+import { parseWindows, inWindow, nextWindowStart, weeklyMinutes, parseDayList } from './src/windows.js';
 import { readIdentity, fillIdentity, enterWizard, IDENTITY_FIELDS } from './src/identity.js';
 import { dueForRefresh, refreshedBody, serviceLabel } from './src/services-step.js';
 import { record, withTabId, nextTabId, markTabId } from './src/experiment.js';
@@ -180,6 +180,10 @@ const config = {
   // hundred spread across a day. Takes priority over POLL_ALIGN_*.
   waveTimes: str('WAVE_TIMES'),
   waveLeadMs: num('WAVE_LEAD_MS', 10_000),
+  // One known wave fixes the phase of the whole grid: 14:45 every 20 minutes
+  // means :05, :25, :45 past the hour.
+  waveEveryMin: num('WAVE_EVERY_MIN', 0),
+  waveDays: str('WAVE_DAYS'),
 
   // Two phases. SCAN: one call per cycle on the round mark (:00, :10, :20…),
   // cheap and wide, looking for WHEN slots appear. HUNT: once a slot has been
@@ -238,9 +242,19 @@ for (const entry of badWaves) {
   console.warn(`  ignoring WAVE_TIMES entry "${entry}" — expected e.g. "14:45"`);
 }
 
-// Spend everything on the wave: holding calls back for later is how you watch
-// the release go past with budget still in hand.
-const waveBurst = Math.max(1, num('WAVE_BURST', config.callBudget));
+const waveDays = parseDayList(config.waveDays);
+if (waveDays === undefined) console.warn(`  ignoring WAVE_DAYS "${config.waveDays}" — expected e.g. "wed" or "tue+thu"`);
+const waveOptions = { everyMin: config.waveEveryMin, days: waveDays ?? null };
+
+/**
+ * How many calls each wave gets.
+ *
+ * A single daily release is worth the whole budget. A grid is not: with waves
+ * every 20 minutes and four calls, one call each covers 80 minutes — longer
+ * than a session lives — while four on one wave would watch the other three
+ * go past with nothing left to spend.
+ */
+const waveBurst = Math.max(1, num('WAVE_BURST', config.waveEveryMin > 0 ? 1 : config.callBudget));
 
 /**
  * Sessions to rotate over.
@@ -1196,11 +1210,24 @@ async function loop() {
   // aligned scanner drives the loop is worse than printing nothing — the two
   // numbers have nothing to do with each other.
   if (waveTimes.length > 0) {
-    const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs);
+    const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs, waveOptions);
+    const grid =
+      config.waveEveryMin > 0
+        ? `every ${config.waveEveryMin}min, phased on ${waveTimes.map((t) => t.label).join(', ')}`
+        : `at ${waveTimes.map((t) => t.label).join(', ')}`;
+
+    console.log(`  schedule : waves ${grid}${config.waveDays ? ` on ${config.waveDays}` : ''}`);
     console.log(
-      `  schedule : waves at ${waveTimes.map((t) => t.label).join(', ')} — ` +
-        `${waveBurst} checks ${config.burstSpacingMs / 1000}s apart, starting ${config.waveLeadMs / 1000}s early`,
+      `             ${waveBurst} check${waveBurst === 1 ? '' : 's'} per wave, ` +
+        `starting ${config.waveLeadMs / 1000}s early` +
+        (waveBurst > 1 ? `, ${config.burstSpacingMs / 1000}s apart` : ''),
     );
+    if (config.waveEveryMin > 0) {
+      console.log(
+        `             ${config.callBudget} calls x ${config.waveEveryMin}min = ` +
+          `${config.callBudget * config.waveEveryMin}min of waves covered by one CAPTCHA`,
+      );
+    }
     console.log(`             next: ${at ? at.toLocaleString('sk-SK', { hour12: false }) : '(none)'}`);
     console.log('             (POLL_ALIGN_* and INTERVAL_MS are unused while this is on)');
   } else if (config.alignMinuteMod > 0) {
@@ -1288,12 +1315,12 @@ async function loop() {
   // The loop's opening ping would spend a quarter of a four-call budget before
   // the release it was captured for. With a wave configured, hold everything.
   if (waveTimes.length > 0 && running) {
-    const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs);
+    const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs, waveOptions);
     const delay = at.getTime() - Date.now();
     const minutes = Math.round(delay / 60_000);
 
     console.log(
-      `[${ts()}] holding all ${waveBurst} checks for the wave at ` +
+      `[${ts()}] ${waveBurst > 1 ? `holding all ${waveBurst} checks` : 'first check held'} for the wave at ` +
         `${at.toLocaleTimeString('sk-SK', { hour12: false })} — ${minutes}min from now.`,
     );
     // Measured: a session answers four times and is gone within the hour. A
@@ -1389,11 +1416,11 @@ async function loop() {
     } else if (waveTimes.length > 0) {
       // A known release time beats anything inferred from a rhythm.
       burstLeft = waveBurst - 1;
-      wait = waveDelayMs(new Date(), waveTimes, config.waveLeadMs);
-      const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs);
+      wait = waveDelayMs(new Date(), waveTimes, config.waveLeadMs, waveOptions);
+      const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs, waveOptions);
       console.log(
-        `[${ts()}] next wave: ${at.toLocaleTimeString('sk-SK', { hour12: false })} ` +
-          `(${waveBurst} checks ${config.burstSpacingMs / 1000}s apart)`,
+        `[${ts()}] next wave: ${at.toLocaleTimeString('sk-SK', { hour12: false })}` +
+          (waveBurst > 1 ? ` (${waveBurst} checks ${config.burstSpacingMs / 1000}s apart)` : ''),
       );
     } else {
       // Hunting aims at the offset a slot was actually seen on and sweeps a

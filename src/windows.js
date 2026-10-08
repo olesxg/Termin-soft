@@ -12,7 +12,13 @@ const MINUTES_PER_DAY = 24 * 60;
  * "mon-fri 18:00-22:00, sat 09:00-12:00, 07:00-08:00"
  */
 
-function parseDays(text) {
+/**
+ * "wed", "mon-fri", "tue+thu" -> Set of weekday numbers.
+ *
+ * @returns {Set<number>|null|undefined} null for every day, undefined when the
+ *   text names something that is not a day.
+ */
+export function parseDayList(text) {
   if (!text) return null; // every day
   const days = new Set();
 
@@ -66,7 +72,7 @@ export function parseWindows(text) {
       continue;
     }
 
-    const days = parseDays(match[1]);
+    const days = parseDayList(match[1]);
     const start = parseClock(match[2]);
     const end = parseClock(match[3]);
     if (days === undefined || start === null || end === null || start === end) {
