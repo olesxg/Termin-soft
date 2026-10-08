@@ -46,6 +46,13 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const IDLE_DEATH_MIN = 90;
 
 /**
+ * Age past which a session is assumed spent, without spending a call to find
+ * out. Measured: four answers and gone inside the hour, {} at 62-65 minutes.
+ * Used to tell, before a wave, whether anything will still be able to answer.
+ */
+const SESSION_LIFE_MIN = 55;
+
+/**
  * pingOnce returns this when the session failed rather than the portal
  * answering: a dead cookie or a spent budget says nothing about slots, so the
  * scheduled slot must be reused on the next session instead of being lost.
@@ -230,6 +237,9 @@ const config = {
   // When a human is reachable to tap a CAPTCHA. Unset = ask whenever the pool
   // empties, which is how the watchdog came to ask at half past three.
   captchaWindows: str('CAPTCHA_WINDOWS'),
+  // How long before a wave a session should be captured. Long enough to do the
+  // CAPTCHA and the SMS, short enough that the session is still alive for it.
+  captureLeadMin: num('CAPTURE_LEAD_MIN', 12),
 };
 
 const { windows: captchaWindows, bad: badWindows } = parseWindows(config.captchaWindows);
@@ -1012,6 +1022,45 @@ async function pingOnce(session) {
   }
 }
 
+/** A clock time for today, a full date for anything further off. */
+function whenText(at, now = new Date()) {
+  const sameDay = at.toDateString() === now.toDateString();
+  return sameDay
+    ? at.toLocaleTimeString('sk-SK', { hour12: false })
+    : at.toLocaleString('sk-SK', { hour12: false });
+}
+
+/** Minutes until the next wave, or null when no waves are configured. */
+function minutesToWave(now = new Date()) {
+  const delay = waveDelayMs(now, waveTimes, config.waveLeadMs, waveOptions);
+  return delay === null ? null : Math.round(delay / 60_000);
+}
+
+/** Could this session still answer at `when`? Age and budget, no call spent. */
+function usableAt(session, when) {
+  if (session.dead) return false;
+  if ((session.calls ?? 0) >= config.callBudget) return false;
+
+  const captured = Date.parse(session.capturedAt ?? '');
+  if (Number.isNaN(captured)) return true; // unknown age is not evidence of death
+  return (when.getTime() - captured) / 60_000 < SESSION_LIFE_MIN;
+}
+
+const poolUsableAt = (when) => sessions.some((session) => usableAt(session, when));
+
+/**
+ * Is now the moment to ask a human for a CAPTCHA?
+ *
+ * Two conditions, and both have to hold. They must be reachable, and the
+ * session it buys must be worth something: with a wave grid, a session
+ * captured an hour before the next release is dead by the time it matters.
+ */
+function shouldAskNow(now = new Date()) {
+  if (!inWindow(now, captchaWindows)) return false;
+  const minutes = minutesToWave(now);
+  return minutes === null || minutes <= config.captureLeadMin;
+}
+
 /** Selector pins for identity fields whose label guess went wrong. */
 function identityOverrides() {
   return Object.fromEntries(
@@ -1128,12 +1177,20 @@ async function waitForWindowOrSession() {
       console.log(`\n[${ts()}] adopted ${added.map((s) => s.label).join(', ')} — polling resumes.`);
       return true;
     }
-    if (inWindow(new Date(), captchaWindows)) {
-      console.log(`\n[${ts()}] CAPTCHA window is open — asking now.`);
+    if (shouldAskNow()) {
+      console.log(`\n[${ts()}] time to capture — asking now.`);
       return false;
     }
   }
   return false;
+}
+
+/** "o 14:45, за 12 хв" — what the reminder has to say to be acted on. */
+function waveNote(now = new Date()) {
+  const at = nextWaveTime(now, waveTimes, config.waveLeadMs, waveOptions);
+  if (!at) return '';
+  const minutes = Math.round((at.getTime() - now.getTime()) / 60_000);
+  return ` Vlna o ${at.toLocaleTimeString('sk-SK', { hour12: false }).slice(0, 5)}, o ${minutes}min.`;
 }
 
 /**
@@ -1183,16 +1240,21 @@ async function handleEmptyPool() {
   // One CAPTCHA buys one hour of watching, so it is only worth asking for while
   // someone is awake to give it — and the hour it buys should be an hour worth
   // watching. Outside the windows the monitor waits in silence.
-  if (!inWindow(new Date(), captchaWindows)) {
+  if (!shouldAskNow()) {
     const opens = nextWindowStart(new Date(), captchaWindows);
+    const minutes = minutesToWave();
     console.warn(
-      `[${ts()}] outside the CAPTCHA windows — staying quiet until ` +
-        `${opens ? opens.toLocaleString('sk-SK', { hour12: false }) : 'the next one'}.`,
+      `[${ts()}] not worth a CAPTCHA yet — ` +
+        (minutes !== null && minutes > config.captureLeadMin
+          ? `next wave is ${minutes}min away, asking ${config.captureLeadMin}min before it.`
+          : `outside the CAPTCHA windows, next ${opens ? opens.toLocaleString('sk-SK', { hour12: false }) : 'one'}.`),
     );
     if (await waitForWindowOrSession()) return;
   }
 
-  await notifyTelegram(`${death.push}\n\nPotrebná CAPTCHA + SMS. Monitor nebeží naprázdno — čaká na novú sesiu.`);
+  await notifyTelegram(
+    `${death.push}\n\nPotrebná CAPTCHA + SMS.${waveNote()}\nNa PC: npm run capture`,
+  );
 
   if (await watchdogRelogin()) {
     writeStatus({ lastResult: 'recovered', poolEmptyAt: null });
@@ -1228,7 +1290,7 @@ async function loop() {
           `${config.callBudget * config.waveEveryMin}min of waves covered by one CAPTCHA`,
       );
     }
-    console.log(`             next: ${at ? at.toLocaleString('sk-SK', { hour12: false }) : '(none)'}`);
+    console.log(`             next: ${at ? whenText(at) : "(none)"}`);
     console.log('             (POLL_ALIGN_* and INTERVAL_MS are unused while this is on)');
   } else if (config.alignMinuteMod > 0) {
     const pad = (n) => String(n).padStart(2, '0');
@@ -1282,6 +1344,9 @@ async function loop() {
   }
   if (config.experimentLog) console.log(`  log      : ${config.experimentLog} (npm run experiment)`);
   console.log(`  on empty : ${config.watchdog ? 'open a window, ask for the CAPTCHA, keep watching' : 'exit'}`);
+  if (config.watchdog && waveTimes.length > 0) {
+    console.log(`  asks     : ${config.captureLeadMin}min before a wave, and only then`);
+  }
   if (config.watchdog && captchaWindows.length > 0) {
     const hours = Math.round(weeklyMinutes(captchaWindows) / 60);
     console.log(`  asks in  : ${captchaWindows.map((w) => w.label).join(' | ')}`);
@@ -1314,29 +1379,33 @@ async function loop() {
 
   // The loop's opening ping would spend a quarter of a four-call budget before
   // the release it was captured for. With a wave configured, hold everything.
-  if (waveTimes.length > 0 && running) {
+  while (waveTimes.length > 0 && running) {
     const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs, waveOptions);
-    const delay = at.getTime() - Date.now();
-    const minutes = Math.round(delay / 60_000);
+    if (!at) break;
 
+    // Waiting out a wave with a pool that cannot answer when it arrives is the
+    // worst of both: the CAPTCHA goes unasked for and the release goes unseen.
+    // Age says whether anything will still be alive, and costs no call to ask.
+    if (!poolUsableAt(at)) {
+      console.warn(`\n[${ts()}] nothing in the pool will still answer at ${whenText(at)}.`);
+      // retireSession, not bury: the portal said nothing, so there is no
+      // outcome to record. A row here would land in the age-at-death figures
+      // as a session that died of something it never got to try.
+      for (const session of sessions) retireSession(session, 'too old to reach the next wave');
+      await handleEmptyPool();
+      if (!running) return;
+      continue; // a fresh session may have moved which wave is reachable
+    }
+
+    const delay = at.getTime() - Date.now();
     console.log(
       `[${ts()}] ${waveBurst > 1 ? `holding all ${waveBurst} checks` : 'first check held'} for the wave at ` +
-        `${at.toLocaleTimeString('sk-SK', { hour12: false })} — ${minutes}min from now.`,
+        `${at.toLocaleTimeString('sk-SK', { hour12: false })} — ${Math.round(delay / 60_000)}min from now.`,
     );
-    // Measured: a session answers four times and is gone within the hour. A
-    // wave further off than that is a CAPTCHA spent on nothing.
-    if (minutes > 55) {
-      console.warn(
-        `  !! a session does not live ${minutes}min. This one will be dead before the wave —\n` +
-          '  !! capture again closer to it, or drop WAVE_TIMES to watch continuously instead.',
-      );
-      await notifyTelegram(
-        `⚠️ Najbližšia vlna je o ${minutes}min, sesia toľko nevydrží. Zachyť znovu tesne pred ňou.`,
-      );
-    }
 
     burstLeft = waveBurst - 1;
     await new Promise((resolve) => setTimeout(resolve, delay));
+    break;
   }
 
   while (running) {
