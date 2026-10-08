@@ -60,3 +60,55 @@ test('the learned offset feeds straight back into the next mark', () => {
 test('no offset to learn when alignment is off', () => {
   assert.equal(minuteOffsetOf(at(23, 8, 0), 0), null);
 });
+
+import { parseWaveTimes, nextWaveTime, waveDelayMs } from '../src/schedule.js';
+
+test('wave times parse, with or without seconds', () => {
+  const { times, bad } = parseWaveTimes('14:45, 22:40:30, 08:00');
+  assert.deepEqual(bad, []);
+  assert.deepEqual(times.map((t) => t.label), ['08:00', '14:45', '22:40:30'], 'sorted by clock');
+  assert.equal(times[2].second, 30);
+});
+
+test('a time that is not a time is named, not dropped in silence', () => {
+  const { times, bad } = parseWaveTimes('14:45, обід, 25:00, 12:70');
+  assert.equal(times.length, 1);
+  assert.deepEqual(bad, ['обід', '25:00', '12:70']);
+});
+
+test('the next wave is the next one today, or the first tomorrow', () => {
+  const { times } = parseWaveTimes('14:45, 22:40');
+  const morning = nextWaveTime(new Date('2026-10-07T09:00:00'), times);
+  assert.equal(morning.getHours(), 14);
+
+  const evening = nextWaveTime(new Date('2026-10-07T20:00:00'), times);
+  assert.equal(evening.getHours(), 22);
+
+  const night = nextWaveTime(new Date('2026-10-07T23:00:00'), times);
+  assert.equal(night.getDate(), 8, 'past the last wave, the next is tomorrow');
+  assert.equal(night.getHours(), 14);
+});
+
+test('the lead puts the first call before the release, not after it', () => {
+  const { times } = parseWaveTimes('14:45');
+  const at = nextWaveTime(new Date('2026-10-07T09:00:00'), times, 10_000);
+  assert.equal(at.getMinutes(), 44);
+  assert.equal(at.getSeconds(), 50);
+});
+
+test('a wave whose lead has already passed rolls to the next one', () => {
+  const { times } = parseWaveTimes('14:45');
+  const at = nextWaveTime(new Date('2026-10-07T14:44:55'), times, 10_000);
+  assert.equal(at.getDate(), 8, 'the lead for today is gone — do not fire late');
+});
+
+test('no waves configured means nothing to wait for', () => {
+  assert.equal(nextWaveTime(new Date(), [], 0), null);
+  assert.equal(waveDelayMs(new Date(), [], 0), null);
+});
+
+test('the delay is positive and matches the instant', () => {
+  const { times } = parseWaveTimes('14:45');
+  const now = new Date('2026-10-07T14:00:00');
+  assert.equal(waveDelayMs(now, times, 0), 45 * 60_000);
+});

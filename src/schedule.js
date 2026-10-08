@@ -52,3 +52,67 @@ export function alignedDelayMs(now, options) {
   const at = nextAlignedTime(now, options);
   return at === null ? null : at.getTime() - now.getTime();
 }
+
+/**
+ * Release waves.
+ *
+ * The portal does not dribble slots out at random: they land in batches at a
+ * clock time, and people who get appointments talk about "the first wave".
+ * With a budget of four, knowing that time is worth more than every other
+ * scheduling knob here put together — four calls on the wave beat four
+ * hundred spread across the day.
+ *
+ * "14:45, 22:40"
+ */
+export function parseWaveTimes(text) {
+  const times = [];
+  const bad = [];
+
+  for (const raw of String(text ?? '').split(',')) {
+    const entry = raw.trim();
+    if (!entry) continue;
+
+    const match = entry.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    const hour = match ? Number(match[1]) : NaN;
+    const minute = match ? Number(match[2]) : NaN;
+    const second = match && match[3] !== undefined ? Number(match[3]) : 0;
+
+    if (!match || hour > 23 || minute > 59 || second > 59) {
+      bad.push(entry);
+      continue;
+    }
+    times.push({ hour, minute, second, label: entry });
+  }
+
+  times.sort((a, b) => a.hour - b.hour || a.minute - b.minute || a.second - b.second);
+  return { times, bad };
+}
+
+/**
+ * When to fire the first call of the next wave.
+ *
+ * `leadMs` before it, so the burst straddles the release rather than starting
+ * after it — the slots caught are the ones seen in the first seconds.
+ */
+export function nextWaveTime(now, times, leadMs = 0) {
+  if (!Array.isArray(times) || times.length === 0) return null;
+
+  for (let ahead = 0; ahead <= 1; ahead += 1) {
+    const day = new Date(now.getTime());
+    day.setDate(day.getDate() + ahead);
+
+    for (const { hour, minute, second } of times) {
+      const at = new Date(day.getTime());
+      at.setHours(hour, minute, second, 0);
+      const fire = new Date(at.getTime() - leadMs);
+      if (fire.getTime() > now.getTime()) return fire;
+    }
+  }
+  return null;
+}
+
+/** Milliseconds until the next wave's first call; null when no waves are set. */
+export function waveDelayMs(now, times, leadMs = 0) {
+  const at = nextWaveTime(now, times, leadMs);
+  return at === null ? null : at.getTime() - now.getTime();
+}

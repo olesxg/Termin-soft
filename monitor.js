@@ -21,7 +21,7 @@ import { str, num, bool, list, json, required, nextDelay, ts } from './src/confi
 import { detectSlots, normalize, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js';
 import { parseBodiesFile, interleavePrimary } from './src/bodies.js';
 import { readPortalStatus, backoffDelay } from './src/portal.js';
-import { alignedDelayMs, minuteOffsetOf } from './src/schedule.js';
+import { alignedDelayMs, minuteOffsetOf, parseWaveTimes, waveDelayMs, nextWaveTime } from './src/schedule.js';
 import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions, serviceLabelOf, sessionAgeMin } from './src/sessions.js';
 import { writeStatus, readStatus } from './src/status.js';
 import { mirrorConsoleTo } from './src/logfile.js';
@@ -175,6 +175,12 @@ const config = {
   burst: Math.max(1, num('POLL_BURST', 1)),
   burstSpacingMs: num('POLL_BURST_SPACING_MS', 1500),
 
+  // Release waves: the clock times the portal publishes batches at. Beats
+  // every other knob here — four calls on the wave are worth more than four
+  // hundred spread across a day. Takes priority over POLL_ALIGN_*.
+  waveTimes: str('WAVE_TIMES'),
+  waveLeadMs: num('WAVE_LEAD_MS', 10_000),
+
   // Two phases. SCAN: one call per cycle on the round mark (:00, :10, :20…),
   // cheap and wide, looking for WHEN slots appear. HUNT: once a slot has been
   // seen, re-aim at the offset it appeared on and cover a window around it —
@@ -226,6 +232,15 @@ const { windows: captchaWindows, bad: badWindows } = parseWindows(config.captcha
 for (const entry of badWindows) {
   console.warn(`  ignoring CAPTCHA_WINDOWS entry "${entry}" — expected e.g. "mon-fri 18:00-22:00"`);
 }
+
+const { times: waveTimes, bad: badWaves } = parseWaveTimes(config.waveTimes);
+for (const entry of badWaves) {
+  console.warn(`  ignoring WAVE_TIMES entry "${entry}" — expected e.g. "14:45"`);
+}
+
+// Spend everything on the wave: holding calls back for later is how you watch
+// the release go past with budget still in hand.
+const waveBurst = Math.max(1, num('WAVE_BURST', config.callBudget));
 
 /**
  * Sessions to rotate over.
@@ -1180,7 +1195,15 @@ async function loop() {
   // Report the schedule actually in force. Printing INTERVAL_MS while the
   // aligned scanner drives the loop is worse than printing nothing — the two
   // numbers have nothing to do with each other.
-  if (config.alignMinuteMod > 0) {
+  if (waveTimes.length > 0) {
+    const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs);
+    console.log(
+      `  schedule : waves at ${waveTimes.map((t) => t.label).join(', ')} — ` +
+        `${waveBurst} checks ${config.burstSpacingMs / 1000}s apart, starting ${config.waveLeadMs / 1000}s early`,
+    );
+    console.log(`             next: ${at ? at.toLocaleString('sk-SK', { hour12: false }) : '(none)'}`);
+    console.log('             (POLL_ALIGN_* and INTERVAL_MS are unused while this is on)');
+  } else if (config.alignMinuteMod > 0) {
     const pad = (n) => String(n).padStart(2, '0');
     console.log(
       `  schedule : scan — ${config.burst} check${config.burst === 1 ? '' : 's'} at :${pad(config.alignMinuteOffset)}:${pad(config.alignSecond)} past every ${config.alignMinuteMod}min`,
@@ -1262,6 +1285,33 @@ async function loop() {
     slotDetail: null,
   });
 
+  // The loop's opening ping would spend a quarter of a four-call budget before
+  // the release it was captured for. With a wave configured, hold everything.
+  if (waveTimes.length > 0 && running) {
+    const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs);
+    const delay = at.getTime() - Date.now();
+    const minutes = Math.round(delay / 60_000);
+
+    console.log(
+      `[${ts()}] holding all ${waveBurst} checks for the wave at ` +
+        `${at.toLocaleTimeString('sk-SK', { hour12: false })} — ${minutes}min from now.`,
+    );
+    // Measured: a session answers four times and is gone within the hour. A
+    // wave further off than that is a CAPTCHA spent on nothing.
+    if (minutes > 55) {
+      console.warn(
+        `  !! a session does not live ${minutes}min. This one will be dead before the wave —\n` +
+          '  !! capture again closer to it, or drop WAVE_TIMES to watch continuously instead.',
+      );
+      await notifyTelegram(
+        `⚠️ Najbližšia vlna je o ${minutes}min, sesia toľko nevydrží. Zachyť znovu tesne pred ňou.`,
+      );
+    }
+
+    burstLeft = waveBurst - 1;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+
   while (running) {
     pings += 1;
     try {
@@ -1336,6 +1386,15 @@ async function loop() {
     } else if (burstLeft > 0) {
       burstLeft -= 1;
       wait = config.burstSpacingMs;
+    } else if (waveTimes.length > 0) {
+      // A known release time beats anything inferred from a rhythm.
+      burstLeft = waveBurst - 1;
+      wait = waveDelayMs(new Date(), waveTimes, config.waveLeadMs);
+      const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs);
+      console.log(
+        `[${ts()}] next wave: ${at.toLocaleTimeString('sk-SK', { hour12: false })} ` +
+          `(${waveBurst} checks ${config.burstSpacingMs / 1000}s apart)`,
+      );
     } else {
       // Hunting aims at the offset a slot was actually seen on and sweeps a
       // window there; scanning takes one shot per cycle on the configured mark.
