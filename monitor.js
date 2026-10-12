@@ -253,7 +253,7 @@ for (const entry of badWaves) {
 }
 
 const waveDays = parseDayList(config.waveDays);
-if (waveDays === undefined) console.warn(`  ignoring WAVE_DAYS "${config.waveDays}" — expected e.g. "wed" or "tue+thu"`);
+if (waveDays === undefined) console.warn(`  ignoring WAVE_DAYS "${config.waveDays}" — expected e.g. "wed, fri" or "mon-fri". Watching every day instead.`);
 const waveOptions = { everyMin: config.waveEveryMin, days: waveDays ?? null };
 
 /**

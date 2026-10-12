@@ -470,7 +470,7 @@ async function writeEnvTemplate(best, cookieHeader, userAgent) {
     '# four calls are worth holding for one. Beats every other scheduling knob.',
     carried.lab.waves ? envLine('WAVE_TIMES', carried.lab.waves) : '# WAVE_TIMES=14:45',
     carried.lab.waveEvery ? envLine('WAVE_EVERY_MIN', carried.lab.waveEvery) : '# WAVE_EVERY_MIN=20',
-    carried.lab.waveDays ? envLine('WAVE_DAYS', carried.lab.waveDays) : '# WAVE_DAYS=wed',
+    carried.lab.waveDays ? envLine('WAVE_DAYS', carried.lab.waveDays) : '# WAVE_DAYS=   # unset = every day; slots turn up daily',
     carried.lab.waveLead ? envLine('WAVE_LEAD_MS', carried.lab.waveLead) : '# WAVE_LEAD_MS=10000',
     carried.lab.waveBurst ? envLine('WAVE_BURST', carried.lab.waveBurst) : '# WAVE_BURST=1',
     carried.lab.captureLead ? envLine('CAPTURE_LEAD_MIN', carried.lab.captureLead) : '# CAPTURE_LEAD_MIN=12',

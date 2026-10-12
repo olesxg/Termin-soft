@@ -70,3 +70,39 @@ test('the weekly budget is what the schedule actually buys', () => {
   assert.equal(weeklyMinutes(parseWindows('07:00-08:00').windows), 7 * 60);
   assert.equal(weeklyMinutes(parseWindows('mon 22:00-02:00').windows), 4 * 60, 'midnight is not a discontinuity');
 });
+
+import { parseDayList } from '../src/windows.js';
+
+const nums = (text) => [...(parseDayList(text) ?? [])].sort((a, b) => a - b);
+
+test('commas separate days, as anyone would expect them to', () => {
+  assert.deepEqual(nums('wed,mon,thu,thur,fri'), [1, 3, 4, 5]);
+  assert.deepEqual(nums('wed, mon, thur'), [1, 3, 4]);
+});
+
+test('plus, space and comma are all separators', () => {
+  assert.deepEqual(nums('tue+thu'), [2, 4]);
+  assert.deepEqual(nums('tue thu'), [2, 4]);
+  assert.deepEqual(nums('tue, thu'), [2, 4]);
+});
+
+test('short and long spellings both work', () => {
+  assert.deepEqual(nums('thur'), [4]);
+  assert.deepEqual(nums('thurs'), [4]);
+  assert.deepEqual(nums('thursday'), [4]);
+  assert.deepEqual(nums('Wednesday Friday'), [3, 5]);
+  assert.deepEqual(nums('WED'), [3]);
+});
+
+test('ranges still work, mixed with lists', () => {
+  assert.deepEqual(nums('mon-fri'), [1, 2, 3, 4, 5]);
+  assert.deepEqual(nums('mon-wed, sat'), [1, 2, 3, 6]);
+});
+
+test('empty means every day, and a non-day is an error, not a silent drop', () => {
+  assert.equal(parseDayList(''), null);
+  assert.equal(parseDayList('   '), null);
+  assert.equal(parseDayList(undefined), null);
+  assert.equal(parseDayList('обід'), undefined);
+  assert.equal(parseDayList('mon, обід'), undefined);
+});

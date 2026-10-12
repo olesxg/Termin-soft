@@ -1,5 +1,22 @@
-const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const MINUTES_PER_DAY = 24 * 60;
+
+/**
+ * Every spelling of a weekday worth accepting.
+ *
+ * Rejecting "thur" or a comma-separated list is not strictness, it is a
+ * config file that quietly does something other than what it says.
+ */
+const DAY_NAMES = new Map([
+  ['sun', 0], ['sunday', 0],
+  ['mon', 1], ['mond', 1], ['monday', 1],
+  ['tue', 2], ['tues', 2], ['tuesday', 2],
+  ['wed', 3], ['weds', 3], ['wednesday', 3],
+  ['thu', 4], ['thur', 4], ['thurs', 4], ['thursday', 4],
+  ['fri', 5], ['friday', 5],
+  ['sat', 6], ['saturday', 6],
+]);
+
+const dayNumber = (name) => DAY_NAMES.get(String(name).trim().toLowerCase()) ?? -1;
 
 /**
  * When a human is reachable to tap a CAPTCHA.
@@ -13,25 +30,30 @@ const MINUTES_PER_DAY = 24 * 60;
  */
 
 /**
- * "wed", "mon-fri", "tue+thu" -> Set of weekday numbers.
+ * "wed", "mon-fri", "tue+thu", "wed, mon, thur" -> Set of weekday numbers.
+ *
+ * Commas, plus signs and spaces all separate; ranges use a dash. Long and
+ * short spellings both work.
  *
  * @returns {Set<number>|null|undefined} null for every day, undefined when the
  *   text names something that is not a day.
  */
 export function parseDayList(text) {
-  if (!text) return null; // every day
+  if (!text || !String(text).trim()) return null; // every day
   const days = new Set();
 
-  for (const part of text.split('+')) {
-    const range = part.trim().toLowerCase().split('-');
-    const from = DAYS.indexOf(range[0]);
+  for (const part of String(text).split(/[,+\s]+/)) {
+    if (!part) continue;
+
+    const range = part.split('-');
+    const from = dayNumber(range[0]);
     if (from === -1) return undefined;
 
     if (range.length === 1) {
       days.add(from);
       continue;
     }
-    const to = DAYS.indexOf(range[1]);
+    const to = dayNumber(range[1]);
     if (to === -1) return undefined;
 
     for (let i = 0; i < 7; i += 1) {
@@ -40,7 +62,7 @@ export function parseDayList(text) {
       if (day === to) break;
     }
   }
-  return days;
+  return days.size > 0 ? days : null;
 }
 
 function parseClock(text) {
