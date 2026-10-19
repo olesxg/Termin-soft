@@ -35,8 +35,14 @@ import { record, withTabId, nextTabId, markTabId } from './src/experiment.js';
 import { appendSessionRecord, readSessionsFile } from './src/sessionfile.js';
 import { relogin } from './src/relogin.js';
 import { awaitCode } from './src/telegram.js';
+import { preferPublicDns } from './src/dns.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+// Before any request: the router's resolver drops out for minutes at a time,
+// and a monitor that cannot resolve the portal is blind in exactly the window
+// that matters. DNS_SERVERS=off leaves resolution to the system.
+preferPublicDns(list('DNS_SERVERS', ['8.8.8.8', '1.1.1.1']));
 
 /**
  * Idle minutes after which a session has been seen to answer 401. Measured on
@@ -51,6 +57,9 @@ const IDLE_DEATH_MIN = 90;
  * Used to tell, before a wave, whether anything will still be able to answer.
  */
 const SESSION_LIFE_MIN = 55;
+
+/** Errors that prove a request never reached the server. */
+const NEVER_SENT = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']);
 
 /**
  * pingOnce returns this when the session failed rather than the portal
@@ -814,12 +823,25 @@ async function pingOnce(session) {
   session.callsSinceRefresh = (session.callsSinceRefresh ?? 0) + 1;
 
   const method = session.method ?? config.method;
-  const response = await client.request({
-    url: requestUrl(session),
-    method,
-    headers: buildHeaders(session),
-    data: method === 'GET' ? undefined : (session.body ?? currentEntry().body) || undefined,
-  });
+  let response;
+  try {
+    response = await client.request({
+      url: requestUrl(session),
+      method,
+      headers: buildHeaders(session),
+      data: method === 'GET' ? undefined : (session.body ?? currentEntry().body) || undefined,
+    });
+  } catch (err) {
+    // Counted up front, so take it back when the request provably never left:
+    // a failed lookup or a refused connection spends nothing. Measured: four
+    // DNS failures in a row made one session read as nine calls spent when the
+    // portal had seen five. A timeout may have arrived, so it stays counted.
+    if (NEVER_SENT.has(err.code)) {
+      session.calls -= 1;
+      session.callsSinceRefresh -= 1;
+    }
+    throw err;
+  }
 
   const { status, data } = response;
 
@@ -1515,5 +1537,19 @@ async function loop() {
 }
 
 process.on('SIGINT', () => shutdown(0, '\nStopped.'));
+
+// Node writes a crash straight to stderr, which dies with the console window,
+// leaving monitor.log to end mid-sentence. On 2026-10-19 the process went
+// between 19:55 and 20:04 — inside the release window — with no trace. A stray
+// rejection, typically Playwright after its window was closed by hand, is
+// logged and survived; an uncaught exception is logged and exits, for the
+// restart loop to bring it back.
+process.on('unhandledRejection', (reason) => {
+  console.error(`\n[${ts()}] unhandled rejection, carrying on: ${reason?.stack ?? reason}`);
+});
+process.on('uncaughtException', (err) => {
+  console.error(`\n[${ts()}] FATAL, exiting for a restart: ${err?.stack ?? err}`);
+  shutdown(1);
+});
 
 loop().catch((err) => shutdown(1, `\nFatal: ${err.message}`));
