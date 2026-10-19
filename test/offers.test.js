@@ -94,3 +94,37 @@ test('a date the portal wrote in some other shape still lists, without a guessed
   assert.equal(offer.daysAway, null);
   assert.match(formatOffers(odd, { now: NOW })[0], /SNINA — 2026-10-20/);
 });
+
+import { isNewDay, alertHeadline } from '../src/offers.js';
+
+test('a date at the far end of the horizon is a newly opened day', () => {
+  const [offer] = parseOffers(SAMPLE, new Date('2026-09-28T20:00:00Z')); // 20.10 is 22 days on
+  assert.equal(isNewDay(offer), true);
+});
+
+test('a date a day or two away is a single returned time', () => {
+  const near = JSON.stringify([{ officeCity: 'Snina', dates: ['15.09.2026'] }]);
+  const [offer] = parseOffers(near, new Date('2026-09-14T07:30:00Z'));
+  assert.equal(isNewDay(offer), false);
+});
+
+test('the headline says which of the two it is', () => {
+  assert.match(alertHeadline(SAMPLE, { now: new Date('2026-09-28T20:00:00Z') }), /НОВИЙ ДЕНЬ/);
+  const near = JSON.stringify([{ officeCity: 'Snina', dates: ['15.09.2026'] }]);
+  assert.match(alertHeadline(near, { now: new Date('2026-09-14T07:30:00Z') }), /окремий час/);
+});
+
+test('one new day among leftovers still makes it the batch', () => {
+  const mixed = JSON.stringify([{ officeCity: 'Snina', dates: ['20.10.2026', '01.10.2026'] }]);
+  assert.match(alertHeadline(mixed, { now: new Date('2026-09-28T20:00:00Z') }), /НОВИЙ ДЕНЬ/);
+});
+
+test('an unreadable answer gets no headline rather than a wrong one', () => {
+  assert.equal(alertHeadline('<html>'), null);
+  assert.equal(alertHeadline('[]'), null);
+});
+
+test('a date in some other format is never called the batch', () => {
+  const odd = JSON.stringify([{ officeCity: 'Snina', dates: ['2026-10-20'] }]);
+  assert.match(alertHeadline(odd, { now: new Date('2026-09-28T20:00:00Z') }), /окремий час/);
+});

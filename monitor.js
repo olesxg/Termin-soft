@@ -27,7 +27,7 @@ import { writeStatus, readStatus } from './src/status.js';
 import { mirrorConsoleTo } from './src/logfile.js';
 import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 import { firstOffer, prepareBooking, openSessionBrowser } from './src/booking.js';
-import { formatOffers } from './src/offers.js';
+import { formatOffers, alertHeadline } from './src/offers.js';
 import { parseWindows, inWindow, nextWindowStart, weeklyMinutes, parseDayList } from './src/windows.js';
 import { readIdentity, fillIdentity, enterWizard, IDENTITY_FIELDS } from './src/identity.js';
 import { dueForRefresh, refreshedBody, serviceLabel } from './src/services-step.js';
@@ -633,8 +633,11 @@ async function announceSlot(hit, session = null) {
   // raw answer is a wall of JSON with branchPublicId in it; city, date and how
   // soon are what decide whether to drop everything and run.
   const offers = formatOffers(hit.sample, { prefer: config.preferOffice });
+  // Batch or leftover decides how fast to run; it goes first, where it is read.
+  const headline = alertHeadline(hit.sample, { horizonDays: num('HORIZON_DAYS', 19) });
 
   stopBeeping = await raiseSlotAlarm([
+    ...(headline ? [headline] : []),
     // An alarm is read in seconds; a line saying "(unnamed)" is only clutter.
     ...(service === '(unnamed)' ? [] : [service]),
     ...(offers.length > 0 ? offers : [hit.sample ? `dates: ${hit.sample}` : 'open the portal tab and click through NOW']),

@@ -89,3 +89,25 @@ export function formatOffers(sample, { prefer = '', now = new Date(), max = 6 } 
 
   return lines;
 }
+
+/**
+ * A slot at the far end of the booking horizon is a whole day that has just
+ * opened — every time from the morning to midday, the batch worth dropping
+ * everything for. A nearer one is a single time someone gave back.
+ *
+ * Measured: every alert of 2026-09-28, 10-05 and 10-12 was exactly 22 days out
+ * and each was a full day; the one that was not, 2026-09-14 for the 15th, was
+ * a lone cancellation.
+ */
+export function isNewDay(offer, horizonDays = 19) {
+  return offer?.daysAway !== null && offer?.daysAway !== undefined && offer.daysAway >= horizonDays;
+}
+
+/** First line of the alert: whether this is the batch or a leftover. */
+export function alertHeadline(sample, { now = new Date(), horizonDays = 19 } = {}) {
+  const offers = parseOffers(sample, now);
+  if (offers.length === 0) return null;
+  return offers.some((offer) => isNewDay(offer, horizonDays))
+    ? '🆕 ВІДКРИВСЯ НОВИЙ ДЕНЬ — уся сітка вільна. Бронюй ЗАРАЗ, живе 10-40 хв.'
+    : '↩ Звільнився окремий час (хтось скасував). Може зникнути за хвилини.';
+}
