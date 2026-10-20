@@ -18,7 +18,13 @@ export const WIZARD_SELECTORS = {
   continueButton: 'button[aria-label^="Pokra"], button, a, input[type=button], input[type=submit]',
   officeRadio: 'input[id^="input-vyberPracoviska-"]',
   dateSelect: 'select#input-dostupneTerminyDatum',
-  choice: 'input[type=radio], a[href], button, [role=radio]',
+  // Never a link that leaves the page. The portal's own menu carries an entry
+  // spelled exactly like the service — "Registrácia dočasného útočiska" — and as
+  // the shortest match it would have won, navigating away from the wizard and
+  // the session with it. Links that only run script stay eligible.
+  choice:
+    'input[type=radio], button, [role=radio], [role=button], ' +
+    'a:not([href]), a[href="#"], a[href^="#"], a[href^="javascript"]',
 };
 
 /**

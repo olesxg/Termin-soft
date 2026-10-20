@@ -156,6 +156,32 @@ async function automate(page, options) {
 }
 
 /**
+ * Drive a page from step one to the dates: the identity, the CAPTCHA wait, the
+ * SMS code, the service and — only when one is named — the office.
+ *
+ * Shared by the watchdog's re-login and the booking window. The booking window
+ * used to stop at the identity form, so a slot found at 21:15 on 2026-10-20 sat
+ * in a window waiting for a human to type the SMS code and pick the service by
+ * hand — the very steps this already did for re-logins.
+ */
+export function driveWizard(page, options = {}) {
+  return automate(page, {
+    identity: readIdentity(),
+    service: '',
+    office: '',
+    readCode: null,
+    notify: async () => {},
+    log: () => {},
+    overrides: {},
+    pinSelector: '',
+    fs: null,
+    dumpDir: '',
+    ...options,
+    timeouts: { ...DEFAULTS, ...(options.timeouts ?? {}) },
+  });
+}
+
+/**
  * @returns {Promise<{ok: boolean, session?: object, browser: object, page: object, reason?: string}>}
  */
 export async function relogin(options = {}) {

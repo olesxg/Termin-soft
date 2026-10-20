@@ -179,7 +179,8 @@ export function recordRequests(page, file, { fs, maxBodyChars = 20_000 } = {}) {
   });
 }
 
-export async function openSessionBrowser(chromium, session, startUrl, { executablePath, recordTo, fs } = {}) {
+export async function openSessionBrowser(chromium, session, startUrl, options = {}) {
+  const { executablePath, recordTo, fs, navTimeoutMs = 120_000 } = options;
   const browser = await chromium.launch({
     headless: false,
     executablePath: executablePath || undefined,
@@ -192,6 +193,18 @@ export async function openSessionBrowser(chromium, session, startUrl, { executab
 
   const page = await context.newPage();
   recordRequests(page, recordTo, { fs });
-  await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
-  return { browser, page };
+
+  // The portal is slowest exactly when a new day opens and everyone arrives at
+  // once. Measured 2026-10-20: a load that takes 1.6s on a quiet evening ran
+  // past Playwright's 30s default at 21:15, the window was given up on, and the
+  // slot went unbooked. A slow load is not a failure — the window is open and
+  // the page usually finishes — so it is reported, never thrown.
+  page.setDefaultNavigationTimeout(navTimeoutMs);
+  let loadError = null;
+  try {
+    await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
+  } catch (err) {
+    loadError = err;
+  }
+  return { browser, page, loadError };
 }

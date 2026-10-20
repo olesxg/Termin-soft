@@ -29,11 +29,11 @@ import { raiseSlotAlarm, notifyTelegram } from './src/alert.js';
 import { firstOffer, prepareBooking, openSessionBrowser } from './src/booking.js';
 import { formatOffers, alertHeadline } from './src/offers.js';
 import { parseWindows, inWindow, nextWindowStart, weeklyMinutes, parseDayList } from './src/windows.js';
-import { readIdentity, fillIdentity, enterWizard, IDENTITY_FIELDS } from './src/identity.js';
+import { IDENTITY_FIELDS } from './src/identity.js';
 import { dueForRefresh, refreshedBody, serviceLabel } from './src/services-step.js';
 import { record, withTabId, nextTabId, markTabId } from './src/experiment.js';
 import { appendSessionRecord, readSessionsFile } from './src/sessionfile.js';
-import { relogin } from './src/relogin.js';
+import { relogin, driveWizard } from './src/relogin.js';
 import { awaitCode } from './src/telegram.js';
 import { preferPublicDns } from './src/dns.js';
 
@@ -558,29 +558,25 @@ let ownBrowser = null;
  * anti-automation controls and are not ours to defeat — but nothing else here
  * needs a person.
  */
-async function prefillBookingIdentity(page) {
-  const identity = readIdentity();
-  if (Object.keys(identity).length === 0) return;
-
-  try {
-    if (await enterWizard(page)) console.log(`[${ts()}] booking window: opened the form`);
-    const { filled, missed } = await fillIdentity(page, identity);
-    if (filled.length > 0) {
-      console.log(`[${ts()}] booking window: ${filled.length} field(s) filled — do the CAPTCHA and the SMS`);
-    }
-    if (missed.length > 0) {
-      console.log(`[${ts()}] booking window: type by hand — ${missed.map((f) => f.label).join(', ')}`);
-    }
-  } catch (err) {
-    // Never let this stop the alarm: the banner and the push already went out.
-    console.warn(`[${ts()}] booking window: could not prefill (${err.message})`);
-  }
+/** The SMS-code reader, or null when the code is to be typed at the machine. */
+function codeReader() {
+  if (!config.smsViaTelegram) return null;
+  return () =>
+    awaitCode({
+      token: str('TELEGRAM_BOT_TOKEN'),
+      chatId: str('TELEGRAM_CHAT_ID'),
+      timeoutMs: num('SMS_CODE_TIMEOUT_MS', 10 * 60_000),
+      log: (message) => console.log(`[${ts()}] sms: ${message}`),
+    });
 }
 
 async function bookingPage(session) {
   if (globalThis.__terminPage) return globalThis.__terminPage;
   if (!bool('PREFILL_BOOKING', true) || !bool('OPEN_BROWSER_ON_SLOT', true)) return null;
-  if (ownBrowser) return ownBrowser.page;
+  // A re-login window closed by hand once its session was captured leaves a
+  // page that answers nothing; reusing it would pre-fill a corpse.
+  if (ownBrowser?.page && !ownBrowser.page.isClosed()) return ownBrowser.page;
+  ownBrowser = null;
 
   try {
     console.log(`[${ts()}] opening a browser on ${session.label}'s cookies...`);
@@ -599,12 +595,27 @@ async function bookingPage(session) {
       executablePath: str('CHROMIUM_EXECUTABLE_PATH'),
       recordTo: bookingLog,
       fs,
+      navTimeoutMs: num('NAV_TIMEOUT_MS', 120_000),
     });
     console.log(`[${ts()}] recording this window's calls -> ${bookingLog}`);
-    // The portal decides where a cookie-carrying window lands, and it is usually
-    // step one — so fill the form now rather than leaving it to be retyped while
-    // the slot is being taken.
-    await prefillBookingIdentity(ownBrowser.page);
+    if (ownBrowser.loadError) {
+      const why = ownBrowser.loadError.message.split('\n')[0];
+      console.warn(`[${ts()}] booking window: slow to load (${why}) — carrying on, it is open.`);
+    }
+
+    // Everything up to the date step except the CAPTCHA is mechanical, and the
+    // race for a fresh day is lost in exactly these minutes. Not awaited: the
+    // human may take minutes over the CAPTCHA, and the watch must go on.
+    driveWizard(ownBrowser.page, {
+      service: config.onlyService,
+      readCode: codeReader(),
+      notify: notifyTelegram,
+      log: (message) => console.log(`[${ts()}] booking window: ${message}`),
+      overrides: identityOverrides(),
+      pinSelector: str('PIN_SELECTOR'),
+      fs,
+      dumpDir: str('CAPTURE_DIR', 'captured'),
+    }).catch((err) => console.warn(`[${ts()}] booking window: stopped (${err.message}) — finish by hand.`));
     return ownBrowser.page;
   } catch (err) {
     console.warn(`[${ts()}] could not open a browser: ${err.message} — book by hand.`);
@@ -629,6 +640,10 @@ async function announceSlot(hit, session = null) {
 
   if (fingerprint === lastSlotFingerprint) {
     console.log(`[${ts()}] same slot still listed — still watching, not re-alarming`);
+    // No second alarm, but a quiet word that it is still there: whoever is
+    // racing for it needs to know there is still time.
+    const still = formatOffers(hit.sample, { prefer: config.preferOffice });
+    await notifyTelegram(`⏳ Ešte stále voľné:\n${still.join('\n') || hit.reason}`);
     return;
   }
   lastSlotFingerprint = fingerprint;
@@ -682,7 +697,8 @@ async function announceSlot(hit, session = null) {
       // has finished the CAPTCHA and the SMS, so this now waits minutes rather
       // than seconds — and blocking the loop for that long would stop the hunt
       // exactly when the next slot could be appearing.
-      prepareBooking(page, offer, { screenshotPath: shot })
+      // Long enough for the CAPTCHA, the SMS and the service to come first.
+      prepareBooking(page, offer, { screenshotPath: shot, officeTimeoutMs: 20 * 60_000 })
         .then(async (done) => {
           if (done.ok) {
             console.log(
@@ -1144,15 +1160,7 @@ async function watchdogRelogin() {
       poolIndex: readSessionsFile(config.sessionsFile).length + 1,
       fs,
       dumpDir: str('CAPTURE_DIR', 'captured'),
-      readCode: config.smsViaTelegram
-        ? () =>
-            awaitCode({
-              token: str('TELEGRAM_BOT_TOKEN'),
-              chatId: str('TELEGRAM_CHAT_ID'),
-              timeoutMs: num('SMS_CODE_TIMEOUT_MS', 10 * 60_000),
-              log: (message) => console.log(`[${ts()}] sms: ${message}`),
-            })
-        : null,
+      readCode: codeReader(),
       notify: notifyTelegram,
       log: (message) => console.log(`[${ts()}] relogin: ${message}`),
     });
