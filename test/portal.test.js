@@ -72,3 +72,16 @@ test('non-JSON and empty bodies do not claim expiry', () => {
   assert.equal(readPortalStatus(null).expired, false);
   assert.equal(readPortalStatus('[]').expired, false);
 });
+
+test('a reissued service id is recognised, not left as inconclusive', () => {
+  const status = readPortalStatus('{"message":"Invalid or expired service ID"}');
+  assert.equal(status.staleService, true);
+  assert.equal(status.expired, false, 'it has a message, so it is not the empty {} death');
+  assert.equal(status.callLimit, false);
+});
+
+test('ordinary answers are not mistaken for a stale service id', () => {
+  assert.equal(readPortalStatus('{"services":[]}').staleService, false);
+  assert.equal(readPortalStatus('{"code":"500","message":"CALL_LIMIT"}').staleService, false);
+  assert.equal(readPortalStatus('<html>').staleService, false);
+});

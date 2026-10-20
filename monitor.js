@@ -926,6 +926,31 @@ async function pingOnce(session) {
     return TRY_NEXT_SESSION;
   }
 
+  // The service id this session asks about has been reissued. Asking the
+  // services step for the current one recovers it — measured not to spend date
+  // budget — and only when that fails is the session given up on, so the
+  // watchdog can ask for a fresh one instead of the pool sitting on a corpse.
+  if (portal.staleService) {
+    noteDateCall(session, 'stale-service-id');
+    if (session.servicesStep && !session.staleRetried) {
+      session.staleRetried = true;
+      session.calls -= 1; // the portal refused the id; nothing was looked up
+      session.callsSinceRefresh -= 1;
+      const refreshed = await refreshServicesContext(session);
+      if (refreshed.ok) {
+        console.warn(`[${ts()}] ${session.label}: its service id had been reissued — fetched the current one, asking again.`);
+        return pingOnce(session);
+      }
+    }
+    bury(session, 'service id expired');
+    poolDeath = {
+      push: '⛔️ The session\'s service id expired and could not be renewed.',
+      exit: '\nThe session\'s service id expired. Run: npm run capture.\n',
+    };
+    console.error(`\n[${ts()}] ${session.label}: service id expired, could not renew it. Still live: ${liveSessions(sessions).length}`);
+    return TRY_NEXT_SESSION;
+  }
+
   if (portal.callLimit) {
     callLimitHits += 1;
     session.callLimits = (session.callLimits ?? 0) + 1;

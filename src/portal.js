@@ -16,7 +16,7 @@ const AUTH_CODES = new Set(['401', '403']);
  * @returns {{authFailed: boolean, callLimit: boolean, code: string|null, message: string}}
  */
 export function readPortalStatus(rawBody) {
-  const empty = { authFailed: false, callLimit: false, expired: false, code: null, message: '' };
+  const empty = { authFailed: false, callLimit: false, expired: false, staleService: false, code: null, message: '' };
   if (!rawBody) return empty;
 
   let parsed;
@@ -50,6 +50,15 @@ export function readPortalStatus(rawBody) {
     // CALL_LIMIT arrives as code 500, but match on the message so a future
     // change of code does not silently turn throttling into a hard error.
     callLimit: /call[_\s-]?limit/i.test(message),
+    /**
+     * {"message":"Invalid or expired service ID"} — the serviceBranchID the
+     * request names is no longer the one the wizard holds. Seen 2026-10-20 at
+     * 21:34 after a restart: the session's id had been replaced by a services-
+     * step replay before it, and the copy on disk was the old one. Answered as
+     * "inconclusive" it left a dead session in the pool, never retired, so the
+     * watchdog never asked for a new one.
+     */
+    staleService: /invalid or expired service/i.test(message),
   };
 }
 
