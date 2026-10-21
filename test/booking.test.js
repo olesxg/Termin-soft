@@ -41,23 +41,38 @@ test('unfamiliar shapes give null rather than throwing', () => {
   assert.equal(firstOffer(JSON.stringify([{ officeName: 'no id', dates: ['1.1.2026'] }])), null);
 });
 
-/** Minimal page double — records the calls prepareBooking makes, in order. */
+/**
+ * Minimal page double — records the calls prepareBooking makes, in order.
+ *
+ * Shaped like the real date step: GOV.UK radios whose label is what gets
+ * clicked, and a loading veil that is waited out silently before each step.
+ */
 const fakePage = (failAt = null) => {
   const calls = [];
   const guard = (name) => {
     calls.push(name);
     if (failAt === name) throw new Error(`${name} exploded`);
   };
+  const stepOf = (sel) => (String(sel).includes('ffice') || String(sel).includes('vyberPracoviska') ? 'office' : 'time');
   return {
     calls,
     bringToFront: async () => guard('focus'),
-    check: async () => guard('office'),
     selectOption: async () => guard('date'),
-    // Two steps wait now: the office radio only exists after the human has
-    // done the CAPTCHA and SMS, so it is waited for like the time list is.
-    waitForSelector: async (sel) =>
-      guard(String(sel).includes('vyberPracoviska') ? 'waitOffice' : 'waitTime'),
-    locator: () => ({ first: () => ({ check: async () => guard('time') }) }),
+    // Two steps wait: the office radio only exists after the human has done
+    // the CAPTCHA and SMS, so it is waited for like the time list is.
+    waitForSelector: async (sel) => {
+      if (sel === SELECTORS.loading) return; // the veil is never up in this double
+      guard(String(sel).includes('vyberPracoviska') ? 'waitOffice' : 'waitTime');
+    },
+    locator: (sel) => ({
+      first: () => ({
+        getAttribute: async (attr) => (attr === 'id' ? `input-${stepOf(sel)}` : '10:10'),
+        count: async () => 1,
+        click: async () => guard(stepOf(sel)),
+        isChecked: async () => true,
+        check: async () => guard(stepOf(sel)),
+      }),
+    }),
     screenshot: async () => guard('screenshot'),
   };
 };
@@ -65,7 +80,7 @@ const fakePage = (failAt = null) => {
 test('it selects office, date and time — and never presses Continue', async () => {
   const page = fakePage();
   const result = await prepareBooking(page, firstOffer(REAL_SAMPLE));
-  assert.deepEqual(result, { ok: true, step: 'ready' });
+  assert.deepEqual(result, { ok: true, step: 'ready', time: '10:10' });
   assert.deepEqual(page.calls, ['focus', 'waitOffice', 'office', 'date', 'waitTime', 'time']);
 });
 

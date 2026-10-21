@@ -23,7 +23,42 @@
  * guessing by name.
  */
 
+/**
+ * Wait out the portal's "loading" veil.
+ *
+ * After a date is chosen the page fetches its times and lays #loading-box over
+ * everything while it does. On 2026-10-21 at 17:56 that veil sat on top of the
+ * 10:10 radio for longer than the 5s the click was given, and the pre-fill gave
+ * up one step from done. Never fatal: if it stays up, the click is tried anyway.
+ */
+export async function waitForIdle(page, timeoutMs = 60_000) {
+  await page.waitForSelector(SELECTORS.loading, { state: 'hidden', timeout: timeoutMs }).catch(() => {});
+}
+
+/**
+ * Choose a GOV.UK-styled radio the way a person does — by its label.
+ *
+ * The input itself is visually hidden and its styled wrapper takes the pointer,
+ * so checking the input directly is refused as "intercepted". The label is what
+ * is actually there to be clicked; forcing the input is the fallback.
+ */
+export async function pickRadio(page, inputSelector, { timeoutMs = 30_000 } = {}) {
+  await waitForIdle(page);
+  const input = page.locator(inputSelector).first();
+  const id = await input.getAttribute('id', { timeout: timeoutMs });
+  const label = id ? page.locator(`label[for="${id}"]`).first() : null;
+
+  if (label && (await label.count()) > 0) {
+    await label.click({ timeout: timeoutMs });
+  }
+  if (!(await input.isChecked().catch(() => false))) {
+    await input.check({ force: true, timeout: timeoutMs });
+  }
+  return input.getAttribute('value');
+}
+
 export const SELECTORS = {
+  loading: '#loading-box',
   office: (branchPublicId) => `input#input-vyberPracoviska-${branchPublicId}`,
   dateSelect: 'select#input-dostupneTerminyDatum',
   timeRadio: 'input[name="dostupneTerminy"]',
@@ -74,21 +109,26 @@ export async function prepareBooking(page, offer, { screenshotPath, officeTimeou
   // appears only once the human has done the CAPTCHA and the SMS. Failing after
   // five seconds meant the pre-fill never had a chance and everything was left
   // to be retyped by hand; waiting is the whole point.
+  // Every step below can sit behind the loading veil, and the portal is at its
+  // slowest when a new day has just opened: 30s each, not 5.
   const office = await step('office', async () => {
     await page.waitForSelector(SELECTORS.office(offer.branchPublicId), { timeout: officeTimeoutMs });
-    await page.check(SELECTORS.office(offer.branchPublicId), { timeout: 5_000 });
+    await pickRadio(page, SELECTORS.office(offer.branchPublicId));
   });
   if (office) return office;
 
-  const date = await step('date', () =>
-    page.selectOption(SELECTORS.dateSelect, { label: offer.date }, { timeout: 5_000 }),
-  );
+  const date = await step('date', async () => {
+    await waitForIdle(page);
+    await page.selectOption(SELECTORS.dateSelect, { label: offer.date }, { timeout: 30_000 });
+  });
   if (date) return date;
 
   // The time list is rendered after the date is chosen; take the first offered.
+  let chosenTime = null;
   const time = await step('time', async () => {
-    await page.waitForSelector(SELECTORS.timeRadio, { timeout: 5_000 });
-    await page.locator(SELECTORS.timeRadio).first().check({ timeout: 5_000 });
+    await waitForIdle(page);
+    await page.waitForSelector(SELECTORS.timeRadio, { timeout: 30_000 });
+    chosenTime = await pickRadio(page, SELECTORS.timeRadio);
   });
   if (time) return time;
 
@@ -96,7 +136,7 @@ export async function prepareBooking(page, offer, { screenshotPath, officeTimeou
     await step('screenshot', () => page.screenshot({ path: screenshotPath, fullPage: false }));
   }
 
-  return { ok: true, step: 'ready' };
+  return { ok: true, step: 'ready', time: chosenTime };
 }
 
 /** "a=1; b=2" -> [{name,value}], tolerating stray spaces and empty segments. */
