@@ -188,8 +188,15 @@ export async function openSessionBrowser(chromium, session, startUrl, options = 
   });
   const context = await browser.newContext({ viewport: null, locale: 'sk-SK', userAgent: session.userAgent || undefined });
 
-  const cookies = parseCookieHeader(session.cookie).map((c) => ({ ...c, url: 'https://portal.minv.sk/' }));
-  if (cookies.length > 0) await context.addCookies(cookies);
+  // Clean by default. Carrying the polling session's cookies over restores
+  // nothing — the 2026-10-20 window still landed on step one — but it ties the
+  // booking to a session that has just spent most of its four calls finding the
+  // slot, so the booking's own date request could be the one that hits
+  // CALL_LIMIT. A clean window makes the login in it a fresh session.
+  if (options.reuseCookies) {
+    const cookies = parseCookieHeader(session.cookie).map((c) => ({ ...c, url: 'https://portal.minv.sk/' }));
+    if (cookies.length > 0) await context.addCookies(cookies);
+  }
 
   const page = await context.newPage();
   recordRequests(page, recordTo, { fs });

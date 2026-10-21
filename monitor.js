@@ -33,7 +33,7 @@ import { IDENTITY_FIELDS } from './src/identity.js';
 import { dueForRefresh, refreshedBody, serviceLabel } from './src/services-step.js';
 import { record, withTabId, nextTabId, markTabId } from './src/experiment.js';
 import { appendSessionRecord, readSessionsFile } from './src/sessionfile.js';
-import { relogin, driveWizard } from './src/relogin.js';
+import { relogin, driveWizard, captureSession } from './src/relogin.js';
 import { awaitCode } from './src/telegram.js';
 import { preferPublicDns } from './src/dns.js';
 
@@ -541,6 +541,58 @@ function shutdown(code, message) {
 let ownBrowser = null;
 
 /**
+ * The booking window's session, on its way into the pool — null when there is
+ * no booking window. Resolves true once adopted, false if none materialised.
+ */
+let bookingCapture = null;
+
+/**
+ * Hand the session a booking window logged into to the pool, once the booking
+ * is done with it.
+ *
+ * Logging in there costs the human a CAPTCHA and an SMS, and buys a session
+ * with its whole budget unspent — wasting it meant asking for another CAPTCHA
+ * minutes later. But not straight away: polling it while the booking runs
+ * would spend the very calls the booking needs. It joins when the window is
+ * closed, or after BOOKING_HOLD_MIN, whichever comes first.
+ */
+function adoptWhenBookingIsDone(page) {
+  const holdMs = num('BOOKING_HOLD_MIN', 15) * 60_000;
+  const poolIndex = readSessionsFile(config.sessionsFile).length + 1;
+
+  bookingCapture = captureSession(page, { dateMarker: config.dateMarker, poolIndex })
+    .then(async (record) => {
+      if (!record) {
+        console.log(`[${ts()}] booking window: never reached the dates, no session to keep.`);
+        return false;
+      }
+      console.log(`[${ts()}] booking window: logged in as ${record.label} — joins the pool when the window closes.`);
+
+      // Already closed means the booking is over: no reason to sit out the hold.
+      if (!page.isClosed()) {
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, holdMs);
+          page.once('close', () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
+
+      const adopted = adoptSession(record);
+      if (adopted) await notifyTelegram(`✅ Sesia z okna rezervácie (${record.label}) je v poole — monitor ňou pokračuje.`);
+      return adopted;
+    })
+    .catch((err) => {
+      console.warn(`[${ts()}] booking window: could not keep its session (${err.message})`);
+      return false;
+    })
+    .finally(() => {
+      bookingCapture = null;
+    });
+}
+
+/**
  * A page to fill the booking in.
  *
  * Prefers the window capture-session already has open (in-process handover).
@@ -606,6 +658,7 @@ async function bookingPage(session) {
     // Everything up to the date step except the CAPTCHA is mechanical, and the
     // race for a fresh day is lost in exactly these minutes. Not awaited: the
     // human may take minutes over the CAPTCHA, and the watch must go on.
+    adoptWhenBookingIsDone(ownBrowser.page);
     driveWizard(ownBrowser.page, {
       service: config.onlyService,
       readCode: codeReader(),
@@ -1294,6 +1347,17 @@ async function handleEmptyPool() {
 
   console.warn(`\n[${ts()}] pool is empty — the watchdog takes over instead of exiting.`);
   writeStatus({ lastResult: 'pool-empty', lastReason: death.push, poolEmptyAt: new Date().toISOString() });
+
+  // A booking window is open and will hand over a fresh session when it is
+  // done. Opening a second window for a re-login now would put two CAPTCHAs
+  // in front of someone who is in the middle of booking.
+  if (bookingCapture) {
+    console.warn(`[${ts()}] a booking window is open — waiting for its session instead of asking for another CAPTCHA.`);
+    if (await bookingCapture) {
+      writeStatus({ lastResult: 'recovered', poolEmptyAt: null });
+      return;
+    }
+  }
 
   // One CAPTCHA buys one hour of watching, so it is only worth asking for while
   // someone is awake to give it — and the hour it buys should be an hour worth

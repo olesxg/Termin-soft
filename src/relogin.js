@@ -156,6 +156,50 @@ async function automate(page, options) {
 }
 
 /**
+ * The session a window holds the moment it reaches the dates, as a record the
+ * pool can take — or null if it never gets there, or arrives without a cookie.
+ *
+ * Attach before the human starts: the services step it records comes first.
+ */
+export function captureSession(page, { dateMarker = DEFAULTS.dateMarker, poolIndex = 1, timeoutMs = DEFAULTS.overallMs } = {}) {
+  const { entries, dateRequest } = watchRequests(page, dateMarker);
+  let timer;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+  });
+  // A window closed before the dates will never reach them; waiting out the
+  // full timeout would hold back the CAPTCHA request for a fresh session.
+  const closed = new Promise((resolve) => page.once('close', () => resolve(null)));
+
+  return Promise.race([dateRequest, timedOut, closed]).then(async (hit) => {
+    clearTimeout(timer);
+    if (!hit) return null;
+
+    let cookie = hit.requestHeaders?.cookie ?? '';
+    try {
+      const cookies = await page.context().cookies();
+      if (cookies.length > 0) cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+    } catch {
+      // the window is gone — the cookie observed on the wire is the same session
+    }
+    if (!cookie) return null;
+
+    return sessionRecord({
+      index: poolIndex,
+      url: hit.url,
+      method: hit.method,
+      headers: hit.requestHeaders ?? {},
+      cookie,
+      userAgent: hit.requestHeaders?.['user-agent'] ?? '',
+      body: hit.postData,
+      referer: hit.pageUrl,
+      services: entries.flatMap((entry) => extractServices(entry.responseBody)),
+      servicesStep: findServicesStep(entries),
+    });
+  });
+}
+
+/**
  * Drive a page from step one to the dates: the identity, the CAPTCHA wait, the
  * SMS code, the service and — only when one is named — the office.
  *
@@ -215,44 +259,21 @@ export async function relogin(options = {}) {
   page.setDefaultNavigationTimeout(timeouts.stepMs);
   page.setDefaultTimeout(timeouts.stepMs);
 
-  const { entries, dateRequest } = watchRequests(page, timeouts.dateMarker);
-  await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
+  const captured = captureSession(page, { dateMarker: timeouts.dateMarker, poolIndex, timeoutMs: timeouts.overallMs });
+  try {
+    await page.goto(startUrl, { waitUntil: 'domcontentloaded' });
+  } catch (err) {
+    // A slow portal is not a failed login: the window is open and finishes.
+    log(`slow to load (${err.message.split('\n')[0]}) — carrying on`);
+  }
 
   automate(page, {
     identity, service, office, readCode, notify, log, timeouts, overrides, pinSelector, fs, dumpDir,
   }).catch((err) => log(`automation stopped: ${err.message}`));
 
-  const timedOut = Symbol('timed-out');
-  const hit = await Promise.race([
-    dateRequest,
-    new Promise((resolve) => setTimeout(() => resolve(timedOut), timeouts.overallMs)),
-  ]);
-
-  if (hit === timedOut) {
-    return { ok: false, browser, page, reason: `no date request in ${Math.round(timeouts.overallMs / 60_000)}min` };
+  const session = await captured;
+  if (!session) {
+    return { ok: false, browser, page, reason: `no session reached the dates in ${Math.round(timeouts.overallMs / 60_000)}min` };
   }
-
-  let cookie = hit.requestHeaders?.cookie ?? '';
-  try {
-    const cookies = await context.cookies();
-    if (cookies.length > 0) cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
-  } catch {
-    // the window is gone — the cookie observed on the wire is the same session
-  }
-  if (!cookie) return { ok: false, browser, page, reason: 'the date request carried no cookie' };
-
-  const session = sessionRecord({
-    index: poolIndex,
-    url: hit.url,
-    method: hit.method,
-    headers: hit.requestHeaders ?? {},
-    cookie,
-    userAgent: hit.requestHeaders?.['user-agent'] ?? '',
-    body: hit.postData,
-    referer: hit.pageUrl,
-    services: entries.flatMap((entry) => extractServices(entry.responseBody)),
-    servicesStep: findServicesStep(entries),
-  });
-
   return { ok: true, session, browser, page };
 }
