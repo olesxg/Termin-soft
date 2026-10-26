@@ -22,6 +22,7 @@ import { detectSlots, normalize, PORTAL_NO_SLOTS_PHRASES } from './src/detect.js
 import { parseBodiesFile, interleavePrimary } from './src/bodies.js';
 import { readPortalStatus, backoffDelay } from './src/portal.js';
 import { alignedDelayMs, minuteOffsetOf, parseWaveTimes, waveDelayMs, nextWaveTime } from './src/schedule.js';
+import { nextDue } from './src/pacing.js';
 import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions, serviceLabelOf, sessionAgeMin } from './src/sessions.js';
 import { writeStatus, readStatus } from './src/status.js';
 import { mirrorConsoleTo } from './src/logfile.js';
@@ -53,10 +54,14 @@ const IDLE_DEATH_MIN = 90;
 
 /**
  * Age past which a session is assumed spent, without spending a call to find
- * out. Measured: four answers and gone inside the hour, {} at 62-65 minutes.
- * Used to tell, before a wave, whether anything will still be able to answer.
+ * out. {} was measured at 62-65 minutes in September; by late October the
+ * sessions were dying around 50. Shorter than the truth is the safe side: the
+ * calls are spent a little early rather than lost when the session goes.
  */
-const SESSION_LIFE_MIN = 55;
+const SESSION_LIFE_MIN = num('SESSION_LIFE_MIN', 50);
+
+/** Kept between the last call and a session's assumed death. */
+const LIFE_MARGIN_MIN = num('SESSION_LIFE_MARGIN_MIN', 3);
 
 /** Errors that prove a request never reached the server. */
 const NEVER_SENT = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']);
@@ -240,6 +245,12 @@ const config = {
   // An empty pool used to end the run. A watchdog instead opens a window, fills
   // the form, asks for the CAPTCHA on the phone and waits — the monitor is the
   // thing that must not stop. Falls back to exiting when no browser can open.
+  // Each session's calls spread evenly over its own life, the most urgent
+  // asked first — instead of one wall-clock grid shared by every session, on
+  // which two live sessions each died of age with calls still unspent.
+  paceByBudget: bool('PACE_BY_BUDGET', true),
+  paceMinGapMs: num('PACE_MIN_GAP_MS', 30_000),
+
   watchdog: bool('WATCHDOG_ON_EMPTY_POOL', true),
   watchdogPollMs: num('WATCHDOG_POLL_MS', 30_000),
   smsViaTelegram: bool('SMS_CODE_VIA_TELEGRAM', false),
@@ -911,6 +922,7 @@ async function pingOnce(session) {
     }
     throw err;
   }
+  session.lastCallAt = Date.now();
 
   const { status, data } = response;
 
@@ -1147,6 +1159,16 @@ function whenText(at, now = new Date()) {
   return sameDay
     ? at.toLocaleTimeString('sk-SK', { hour12: false })
     : at.toLocaleString('sk-SK', { hour12: false });
+}
+
+/** Pacing parameters for nextDue, at this moment. */
+function paceOptions(now = Date.now()) {
+  return {
+    budget: config.callBudget,
+    lifeMs: SESSION_LIFE_MIN * 60_000,
+    marginMs: LIFE_MARGIN_MIN * 60_000,
+    now,
+  };
 }
 
 /** Minutes until the next wave, or null when no waves are configured. */
@@ -1393,7 +1415,16 @@ async function loop() {
   // Report the schedule actually in force. Printing INTERVAL_MS while the
   // aligned scanner drives the loop is worse than printing nothing — the two
   // numbers have nothing to do with each other.
-  if (waveTimes.length > 0) {
+  if (config.paceByBudget) {
+    const deadline = SESSION_LIFE_MIN - LIFE_MARGIN_MIN;
+    const gap = config.callBudget > 1 ? Math.round(deadline / (config.callBudget - 1)) : deadline;
+    console.log(
+      `  schedule : each session's ${config.callBudget} calls spread over its ${SESSION_LIFE_MIN}min life — ` +
+        `one at once, then every ~${gap}min, the last ${LIFE_MARGIN_MIN}min before it dies`,
+    );
+    console.log('             with several sessions, the one nearest its end is asked first');
+    console.log('             (WAVE_*, POLL_ALIGN_* and INTERVAL_MS are unused while PACE_BY_BUDGET is on)');
+  } else if (waveTimes.length > 0) {
     const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs, waveOptions);
     const grid =
       config.waveEveryMin > 0
@@ -1501,7 +1532,7 @@ async function loop() {
 
   // The loop's opening ping would spend a quarter of a four-call budget before
   // the release it was captured for. With a wave configured, hold everything.
-  while (waveTimes.length > 0 && running) {
+  while (!config.paceByBudget && waveTimes.length > 0 && running) {
     const at = nextWaveTime(new Date(), waveTimes, config.waveLeadMs, waveOptions);
     if (!at) break;
 
@@ -1531,6 +1562,19 @@ async function loop() {
   }
 
   while (running) {
+    // Nobody due yet: wait for the turn of the most urgent session, looking at
+    // the pool file once a minute so a capture taken meanwhile is picked up —
+    // but asking the portal nothing until a session's turn has come.
+    if (config.paceByBudget) {
+      refreshSessionsFromDisk();
+      const due = nextDue(liveSessions(sessions), paceOptions());
+      const ahead = due ? due.at - Date.now() : 0;
+      if (ahead > 1000) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(ahead, 60_000)));
+        continue;
+      }
+    }
+
     pings += 1;
     try {
       // One scheduled mark = one ANSWER about slots, not one HTTP request. A
@@ -1546,7 +1590,10 @@ async function loop() {
       // answer is about.
       let answeredBy = null;
       for (let attempt = 0; attempt < sessions.length && running; attempt += 1) {
-        const turn = nextSession(sessions, sessionCursor);
+        const due = config.paceByBudget ? nextDue(liveSessions(sessions), paceOptions()) : null;
+        const turn = config.paceByBudget
+          ? due && { session: due.session, cursor: sessions.indexOf(due.session) }
+          : nextSession(sessions, sessionCursor);
         if (!turn) break;
         sessionCursor = turn.cursor;
 
@@ -1601,6 +1648,11 @@ async function loop() {
     if (extraWaitMs > 0) {
       wait = Math.max(extraWaitMs, nextDelay(config.intervalMs, config.jitterMs));
       burstLeft = 0;
+    } else if (config.paceByBudget) {
+      // Only the minimum gap here; the top of the loop waits for the next
+      // session's turn without asking the portal anything meanwhile.
+      burstLeft = 0;
+      wait = config.paceMinGapMs;
     } else if (burstLeft > 0) {
       burstLeft -= 1;
       wait = config.burstSpacingMs;
