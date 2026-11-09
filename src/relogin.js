@@ -95,6 +95,13 @@ async function automate(page, options) {
     log(`no ID_* values set — fill the form by hand (${IDENTITY_FIELDS.map((f) => f.env).join(', ')})`);
   }
 
+  // A closed window has no CAPTCHA to solve; asking for one would send someone
+  // to the PC for nothing.
+  if (page.isClosed()) {
+    log('the window closed before the CAPTCHA — nothing to ask for');
+    return;
+  }
+
   await notify(
     '🔐 Potrebná CAPTCHA. Anketa je vyplnená — vyrieš CAPTCHA v okne, ďalej to ide samo.\n' +
       'SMS prijde až po nej, takže kým o kód nepoprosím, žiadny nečakaj.',
@@ -273,7 +280,12 @@ export async function relogin(options = {}) {
 
   const session = await captured;
   if (!session) {
-    return { ok: false, browser, page, reason: `no session reached the dates in ${Math.round(timeouts.overallMs / 60_000)}min` };
+    // "in 30min" was printed six seconds after the window opened on 2026-11-08,
+    // when it had simply been closed. Say which of the two it was.
+    const reason = page.isClosed()
+      ? 'the window closed before the dates were reached'
+      : `no session reached the dates in ${Math.round(timeouts.overallMs / 60_000)}min`;
+    return { ok: false, browser, page, reason };
   }
   return { ok: true, session, browser, page };
 }

@@ -23,6 +23,7 @@ import { parseBodiesFile, interleavePrimary } from './src/bodies.js';
 import { readPortalStatus, backoffDelay } from './src/portal.js';
 import { alignedDelayMs, minuteOffsetOf, parseWaveTimes, waveDelayMs, nextWaveTime } from './src/schedule.js';
 import { nextDue } from './src/pacing.js';
+import { nextAttemptDelay } from './src/watchdog.js';
 import { parseSessions, nextSession, retireSession, liveSessions, summarise, mergeSessions, freshSessions, serviceLabelOf, sessionAgeMin } from './src/sessions.js';
 import { writeStatus, readStatus } from './src/status.js';
 import { mirrorConsoleTo } from './src/logfile.js';
@@ -260,6 +261,10 @@ const config = {
   // How long before a wave a session should be captured. Long enough to do the
   // CAPTCHA and the SMS, short enough that the session is still alive for it.
   captureLeadMin: num('CAPTURE_LEAD_MIN', 12),
+  // An empty pool is retried, not waited out: a fresh window and a reminder
+  // every RELOGIN_RETRY_MIN, sooner when a window broke within seconds.
+  reloginRetryMs: num('RELOGIN_RETRY_MIN', 30) * 60_000,
+  reloginQuickRetryMs: num('RELOGIN_QUICK_RETRY_SEC', 120) * 1000,
 };
 
 const { windows: captchaWindows, bad: badWindows } = parseWindows(config.captchaWindows);
@@ -1173,6 +1178,7 @@ function paceOptions(now = Date.now()) {
 
 /** Minutes until the next wave, or null when no waves are configured. */
 function minutesToWave(now = new Date()) {
+  if (config.paceByBudget) return null;
   const delay = waveDelayMs(now, waveTimes, config.waveLeadMs, waveOptions);
   return delay === null ? null : Math.round(delay / 60_000);
 }
@@ -1238,7 +1244,17 @@ function adoptSession(entry) {
  * @returns {Promise<boolean>} false when the login could not finish — the
  *   window stays open and the passive wait below takes over.
  */
+/** The window of the last failed re-login, closed before the next one opens. */
+let reloginWindow = null;
+
 async function watchdogRelogin() {
+  // One window at a time: a retry every half hour would otherwise leave a
+  // night's worth of stale CAPTCHAs open behind each other.
+  if (reloginWindow) {
+    await reloginWindow.close().catch(() => {});
+    reloginWindow = null;
+  }
+
   let chromium;
   try {
     ({ chromium } = await import('playwright'));
@@ -1267,7 +1283,7 @@ async function watchdogRelogin() {
 
     if (!outcome.ok) {
       console.warn(`[${ts()}] re-login never reached the dates: ${outcome.reason}`);
-      await notifyTelegram(`⚠️ Re-login nedokončený: ${outcome.reason}. Okno je otvorené — dokonči ho ručne.`);
+      reloginWindow = outcome.browser;
       return false;
     }
 
@@ -1327,29 +1343,6 @@ function waveNote(now = new Date()) {
 }
 
 /**
- * The passive half of the watchdog: `npm run capture` in another window is
- * still the most reliable way to make a session, and the monitor has to be the
- * thing already running when one appears.
- */
-async function waitForFreshSession() {
-  console.warn(
-    `\n[${ts()}] waiting for a session in ${config.sessionsFile} — run \`npm run capture\`.\n` +
-      '  The monitor stays up and adopts it by itself. Nothing is lost by leaving this running.',
-  );
-
-  while (running) {
-    await new Promise((resolve) => setTimeout(resolve, config.watchdogPollMs));
-
-    const added = adoptFromDisk();
-    if (!added) continue;
-
-    console.log(`\n[${ts()}] adopted ${added.map((s) => s.label).join(', ')} — polling resumes.`);
-    await notifyTelegram('✅ Monitor pokračuje — nová sesia je v poole.');
-    return;
-  }
-}
-
-/**
  * An empty pool is a call for help, not a reason to stop: exiting here meant
  * the one process that could alert on a slot was gone by the time anyone
  * looked. Exiting is now only the fallback for having no browser at all.
@@ -1400,13 +1393,54 @@ async function handleEmptyPool() {
     `${death.push}\n\nPotrebná CAPTCHA + SMS.${waveNote()}\nNa PC: npm run capture`,
   );
 
-  if (await watchdogRelogin()) {
-    writeStatus({ lastResult: 'recovered', poolEmptyAt: null });
-    return;
-  }
+  // Retried until a session comes, from the re-login or from a capture taken
+  // by hand meanwhile. One attempt and a wait with no end is how 2026-11-08
+  // went: a window broke six seconds in and nothing happened after it.
+  let quickStreak = 0;
+  for (let attempt = 1; running; attempt += 1) {
+    if (attempt > 1) await notifyTelegram(`🔁 Stále treba CAPTCHA + SMS — pokus ${attempt}. Okno je otvorené na PC.`);
 
-  await waitForFreshSession();
-  writeStatus({ lastResult: 'recovered', poolEmptyAt: null });
+    const started = Date.now();
+    if (await watchdogRelogin()) {
+      writeStatus({ lastResult: 'recovered', poolEmptyAt: null });
+      return;
+    }
+
+    const next = nextAttemptDelay(Date.now() - started, quickStreak, {
+      retryMs: config.reloginRetryMs,
+      quickRetryMs: config.reloginQuickRetryMs,
+    });
+    quickStreak = next.quickStreak;
+    const until = new Date(Date.now() + next.delayMs);
+    console.warn(
+      `[${ts()}] no session yet — trying again at ${until.toLocaleTimeString('sk-SK', { hour12: false })}` +
+        ' (or sooner, the moment a capture lands in the pool).',
+    );
+
+    if (await waitForSessionOrTimeout(next.delayMs)) {
+      writeStatus({ lastResult: 'recovered', poolEmptyAt: null });
+      return;
+    }
+  }
+}
+
+/**
+ * Wait for a session to appear on disk, up to a limit.
+ *
+ * @returns {Promise<boolean>} true when one was adopted
+ */
+async function waitForSessionOrTimeout(limitMs) {
+  const deadline = Date.now() + limitMs;
+  while (running && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(config.watchdogPollMs, deadline - Date.now())));
+    const added = adoptFromDisk();
+    if (added) {
+      console.log(`\n[${ts()}] adopted ${added.map((s) => s.label).join(', ')} — polling resumes.`);
+      await notifyTelegram('✅ Monitor pokračuje — nová sesia je v poole.');
+      return true;
+    }
+  }
+  return false;
 }
 
 async function loop() {
@@ -1497,8 +1531,12 @@ async function loop() {
   }
   if (config.experimentLog) console.log(`  log      : ${config.experimentLog} (npm run experiment)`);
   console.log(`  on empty : ${config.watchdog ? 'open a window, ask for the CAPTCHA, keep watching' : 'exit'}`);
-  if (config.watchdog && waveTimes.length > 0) {
-    console.log(`  asks     : ${config.captureLeadMin}min before a wave, and only then`);
+  if (config.watchdog) {
+    console.log(
+      !config.paceByBudget && waveTimes.length > 0
+        ? `  asks     : ${config.captureLeadMin}min before a wave, and only then`
+        : `  asks     : as soon as the pool is empty, then again every ${config.reloginRetryMs / 60_000}min until a session comes`,
+    );
   }
   if (config.watchdog && captchaWindows.length > 0) {
     const hours = Math.round(weeklyMinutes(captchaWindows) / 60);
