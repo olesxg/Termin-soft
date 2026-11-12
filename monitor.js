@@ -1336,6 +1336,9 @@ async function waitForWindowOrSession() {
 
 /** "o 14:45, за 12 хв" — what the reminder has to say to be acted on. */
 function waveNote(now = new Date()) {
+  // No waves drive anything while pacing; naming one in the push made it read
+  // as though the bot still hunted by the clock, which it has not since 26.10.
+  if (config.paceByBudget) return '';
   const at = nextWaveTime(now, waveTimes, config.waveLeadMs, waveOptions);
   if (!at) return '';
   const minutes = Math.round((at.getTime() - now.getTime()) / 60_000);
