@@ -54,6 +54,13 @@ preferPublicDns(list('DNS_SERVERS', ['8.8.8.8', '1.1.1.1']));
 const IDLE_DEATH_MIN = 90;
 
 /**
+ * A {} answer younger than this is not a session reaching the end of its hour
+ * but a context dropped by the portal — seen at one minute old, twice. Such a
+ * session gets one attempt at rebuilding its context before it is buried.
+ */
+const EARLY_DEATH_MIN = 15;
+
+/**
  * Age past which a session is assumed spent, without spending a call to find
  * out. {} was measured at 62-65 minutes in September; by late October the
  * sessions were dying around 50. Shorter than the truth is the safe side: the
@@ -981,6 +988,26 @@ async function pingOnce(session) {
   // otherwise call it "inconclusive" and keep polling a corpse.
   if (portal.expired) {
     noteDateCall(session, 'expired');
+    const age = sessionAgeMin(session);
+    const early = age !== null && age < EARLY_DEATH_MIN;
+
+    // Twice a session died on its very first call, a minute after its CAPTCHA
+    // and SMS (s5 on 2026-11-10, s3 on 2026-11-13): cookie still accepted, the
+    // wizard context gone. The services step is what builds that context, so it
+    // is replayed once and the dates asked again before a CAPTCHA and an SMS are
+    // thrown away. Nothing is lost when it fails — the session was dead anyway.
+    if (early && session.servicesStep && !session.expiredRetried) {
+      session.expiredRetried = true;
+      session.calls -= 1; // the context was gone; nothing was looked up
+      session.callsSinceRefresh -= 1;
+      const restored = await refreshServicesContext(session);
+      if (restored.ok) {
+        console.warn(`[${ts()}] ${session.label}: answered {} at ${age}min — rebuilt its context from the services step, asking again.`);
+        return pingOnce(session);
+      }
+      console.warn(`[${ts()}] ${session.label}: answered {} at ${age}min, and the services step could not bring it back (${restored.reason}).`);
+    }
+
     bury(session, 'expired ({} response)');
     writeStatus({ lastResult: 'expired', lastPingAt: new Date().toISOString(), pings });
     poolDeath = {
@@ -988,6 +1015,13 @@ async function pingOnce(session) {
       exit:
         '\nEvery session has expired — the portal still accepts the cookie but has dropped the\n' +
         'booking context, so it answers {}. Sessions last about an hour. Run: npm run capture.\n',
+      // Said out loud only when it is not the ordinary end of an hour: without
+      // it, "✅ new session in the pool" was followed 30s later by a bare
+      // CAPTCHA request, which reads as the bot not seeing the capture at all.
+      notify: early
+        ? `⛔️ ${session.label}: бот її підхопив, але портал скинув сесію на першому ж запиті ` +
+          `(через ${age} хв, відповідь {}). Це не бот її не бачив — портал її вбив. Потрібна нова капча.`
+        : null,
     };
     console.error(
       `\n[${ts()}] ${session.label} answered {} — session context expired after ${sessionAgeMin(session) ?? '?'}min. ` +
@@ -1365,6 +1399,7 @@ async function handleEmptyPool() {
 
   console.warn(`\n[${ts()}] pool is empty — the watchdog takes over instead of exiting.`);
   writeStatus({ lastResult: 'pool-empty', lastReason: death.push, poolEmptyAt: new Date().toISOString() });
+  if (death.notify) await notifyTelegram(death.notify);
 
   // A booking window is open and will hand over a fresh session when it is
   // done. Opening a second window for a re-login now would put two CAPTCHAs
